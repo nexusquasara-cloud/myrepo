@@ -18,8 +18,23 @@ def health_check():
 def ultramsg_webhook():
     data = request.json or {}
 
-    phone = data.get("from")
-    name = data.get("notifyName") or "WhatsApp User"
+    print("UltraMsg webhook received")
+    print(f"Incoming payload: {data}")
+
+    sender_info = data.get("sender") or {}
+    phone = (
+        data.get("from")
+        or data.get("phone")
+        or sender_info.get("phone")
+    )
+    print(f"Extracted phone: {phone}")
+
+    name = (
+        data.get("notifyName")
+        or sender_info.get("name")
+        or sender_info.get("pushname")
+        or "Unknown"
+    )
 
     if not phone:
         return "No phone", 400
@@ -28,10 +43,15 @@ def ultramsg_webhook():
     existing = supabase.table("clients").select("id").eq("phone", phone).execute()
 
     if not existing.data:
-        supabase.table("clients").insert({
-            "phone": phone,
-            "name": name
-        }).execute()
+        print("Inserting client into Supabase")
+        try:
+            supabase.table("clients").insert({
+                "phone": phone,
+                "name": name
+            }).execute()
+        except Exception as exc:
+            print(f"Supabase insertion failed: {exc}")
+            raise
 
     return "OK", 200
 
