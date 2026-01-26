@@ -21,12 +21,17 @@ def ultramsg_webhook():
     print("UltraMsg webhook received")
     print(f"Incoming payload: {data}")
 
+    payload_data = data.get("data") or {}
+    message_info = data.get("message") or {}
     sender_info = data.get("sender") or {}
     phone = (
-        data.get("from")
-        or data.get("phone")
-        or sender_info.get("phone")
+        payload_data.get("from")
+        or payload_data.get("chatId")
+        or data.get("author")
+        or message_info.get("from")
     )
+    if isinstance(phone, str):
+        phone = phone.replace("@c.us", "")
     print(f"Extracted phone: {phone}")
 
     name = (
@@ -37,7 +42,8 @@ def ultramsg_webhook():
     )
 
     if not phone:
-        return "No phone", 400
+        print("Phone number not found in payload")
+        return "No phone", 200
 
     # تحقق هل العميل موجود
     existing = supabase.table("clients").select("id").eq("phone", phone).execute()
