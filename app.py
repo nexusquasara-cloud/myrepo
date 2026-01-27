@@ -22,8 +22,8 @@ if not ULTRAMSG_CHAT_URL and ULTRAMSG_INSTANCE_ID:
         f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/chat"
     )
 
-OWNER_WHATSAPP_NUMBER = "+15551234567"
-NOTIFICATION_INTERVAL_SECONDS = 3600
+OWNER_WHATSAPP_NUMBER = "9647722602749"
+NOTIFICATION_INTERVAL_SECONDS = 60  # TEST MODE: notification check every 1 minute
 NOTIFICATION_LOOKAHEAD_DAYS = 7
 STATUS_LABELS = {"overdue": "Overdue", "expiring": "Expiring Soon"}
 
