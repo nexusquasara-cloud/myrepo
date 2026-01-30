@@ -273,18 +273,30 @@ start_rental_notification_scheduler()
 @app.route("/wasender/webhook", methods=["POST"])
 def wasender_webhook():
     print("[WasenderWebhook] ===== NEW REQUEST =====")
-    print("[WasenderWebhook] Incoming webhook received")
-    signature = request.headers.get("X-Webhook-Signature")
-    print("[WasenderWebhook] Signature:", signature)
 
-    headers_dump = {k: v for k, v in request.headers.items()}
-    print("[WasenderWebhook] Headers:", headers_dump)
-
-    raw_body = request.get_data(as_text=True)
-    print("[WasenderWebhook] Raw body:", raw_body)
-
-    payload = request.json or {}
+    payload = request.get_json(silent=True) or {}
     print("[WasenderWebhook] Payload:", payload)
+
+    phone = None
+
+    try:
+        messages = payload.get("data", {}).get("messages", {})
+        phone = messages.get("senderPn") or messages.get("from")
+    except Exception as e:
+        print("[WasenderWebhook] Error extracting phone:", e)
+
+    if phone and "@s.whatsapp.net" in phone:
+        phone = phone.split("@")[0]
+
+    if phone:
+        phone = "".join(filter(str.isdigit, phone))
+
+    if not phone:
+        print("[WasenderWebhook] Missing phone number")
+        return jsonify({"status": "ignored"}), 200
+
+    print(f"[WasenderWebhook] Extracted phone: {phone}")
+
     response_payload = {"received": True}
 
     event = payload.get("event") or ""
@@ -299,26 +311,7 @@ def wasender_webhook():
     message_block = data.get("message") or {}
     key_block = data.get("key") or {}
     sender_pn = data.get("senderPn")
-
-    phone = None
-    phone_source = None
-    if data.get("from"):
-        phone = data.get("from")
-        phone_source = "data.from"
-    elif message_block.get("from"):
-        phone = message_block.get("from")
-        phone_source = "data.message.from"
-    elif key_block.get("remoteJid"):
-        phone = key_block.get("remoteJid")
-        phone_source = "data.key.remoteJid"
-    elif sender_pn:
-        phone = sender_pn
-        phone_source = "data.senderPn"
     name = data.get("pushName") or "Unknown"
-
-    if not phone:
-        print("[WasenderWebhook] Missing phone number")
-        return jsonify(response_payload), 200
 
     raw_phone = str(phone)
     raw_phone = raw_phone.replace("@s.whatsapp.net", "").replace("@c.us", "")
