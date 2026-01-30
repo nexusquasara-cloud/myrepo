@@ -298,12 +298,22 @@ def wasender_webhook():
     print("[WasenderWebhook] Data section:", data)
     message_block = data.get("message") or {}
     key_block = data.get("key") or {}
+    sender_pn = data.get("senderPn")
 
-    phone = (
-        data.get("from")
-        or message_block.get("from")
-        or key_block.get("remoteJid")
-    )
+    phone = None
+    phone_source = None
+    if data.get("from"):
+        phone = data.get("from")
+        phone_source = "data.from"
+    elif message_block.get("from"):
+        phone = message_block.get("from")
+        phone_source = "data.message.from"
+    elif key_block.get("remoteJid"):
+        phone = key_block.get("remoteJid")
+        phone_source = "data.key.remoteJid"
+    elif sender_pn:
+        phone = sender_pn
+        phone_source = "data.senderPn"
     name = data.get("pushName") or "Unknown"
 
     if not phone:
@@ -322,6 +332,8 @@ def wasender_webhook():
     if not digits.startswith("964"):
         digits = "964" + digits
     normalized_phone = digits
+    if phone_source == "data.senderPn":
+        print("[WasenderWebhook] Phone extracted from senderPn:", normalized_phone)
     print("[WasenderWebhook] Extracted phone:", normalized_phone)
 
     try:
