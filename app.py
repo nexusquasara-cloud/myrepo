@@ -25,15 +25,26 @@ WASENDER_API_KEY = os.environ.get("WASENDER_API_KEY") or ""
 WASENDER_TOKEN = os.environ.get("WASENDER_TOKEN") or ""
 WASENDER_DEVICE_ID = os.environ.get("WASENDER_DEVICE_ID") or ""
 
+TEST_MODE = True
+
 OWNER_WHATSAPP_NUMBER = "9647722602749"
-NOTIFICATION_INTERVAL_SECONDS = 60  # TEST MODE: notification check every 1 minute
 NOTIFICATION_LOOKAHEAD_DAYS = 7
+TEST_MODE_LOOKAHEAD_SECONDS = 60
+NOTIFICATION_INTERVAL_SECONDS = 5 if TEST_MODE else 60
+LOOKAHEAD_WINDOW_SECONDS = (
+    TEST_MODE_LOOKAHEAD_SECONDS if TEST_MODE else NOTIFICATION_LOOKAHEAD_DAYS * 86400
+)
 STATUS_LABELS = {"overdue": "Overdue", "expiring": "Expiring Soon"}
 
 
 def fetch_rentals_from_supabase():
     now = datetime.now(timezone.utc)
-    upcoming_limit = now + timedelta(days=NOTIFICATION_LOOKAHEAD_DAYS)
+    lookahead_delta = (
+        timedelta(seconds=TEST_MODE_LOOKAHEAD_SECONDS)
+        if TEST_MODE
+        else timedelta(days=NOTIFICATION_LOOKAHEAD_DAYS)
+    )
+    upcoming_limit = now + lookahead_delta
     print(
         "[RentalNotifier] Fetching rentals. "
         f"Now={now.isoformat()} UpcomingLimit={upcoming_limit.isoformat()}"
@@ -240,6 +251,32 @@ def normalize_iraqi_phone_from_jid(value):
     return None
 
 
+def _log_rental_debug(rental):
+    now = datetime.now(timezone.utc)
+    start_dt = _parse_datetime(rental.get("start_datetime"))
+    end_dt = _parse_datetime(rental.get("end_datetime"))
+    remaining_seconds = None
+    if end_dt:
+        remaining_seconds = (end_dt - now).total_seconds()
+
+    status = "unknown"
+    if remaining_seconds is not None:
+        if remaining_seconds <= 0:
+            status = "overdue"
+        elif remaining_seconds <= LOOKAHEAD_WINDOW_SECONDS:
+            status = "expiring"
+        else:
+            status = "active"
+
+    print(
+        "[RentalNotifier] Rental debug -> "
+        f"id={rental.get('id')} now={now.isoformat()} "
+        f"start={start_dt.isoformat() if start_dt else 'N/A'} "
+        f"end={end_dt.isoformat() if end_dt else 'N/A'} "
+        f"remaining={remaining_seconds} status={status}"
+    )
+
+
 def _process_rental_list(rentals, notification_type):
     print(
         f"[RentalNotifier] Processing {len(rentals)} rentals "
@@ -247,6 +284,7 @@ def _process_rental_list(rentals, notification_type):
     )
     sent_count = 0
     for rental in rentals:
+        _log_rental_debug(rental)
         rental_id = rental.get("id")
         end_dt = _parse_datetime(rental.get("end_datetime"))
         if rental_id is None or not end_dt:
