@@ -301,36 +301,53 @@ def wasender_webhook():
     print("[WasenderWebhook] Extracted senderPn:", sender_pn)
     print("[WasenderWebhook] Extracted participant:", participant)
 
-    phone_candidate = remote_jid or sender_pn or participant
-    if not phone_candidate:
-        print("[WasenderWebhook] NO PHONE FOUND - missing remoteJid/senderPn/participant")
-        return jsonify({"status": "ignored"}), 200
+    response_payload = {"received": True}
+    normalized_phone = None
 
-    phone_str = str(phone_candidate)
-    print("[WasenderWebhook] Raw phone value:", phone_str)
-    digits_only = "".join(filter(str.isdigit, phone_str))
-    print("[WasenderWebhook] Digits-only phone:", digits_only)
-
-    local_part = ""
-    if digits_only.startswith("964"):
-        local_part = digits_only[3:]
+    if sender_pn:
+        cleaned_sender = (
+            str(sender_pn).replace("@s.whatsapp.net", "").replace("@c.us", "")
+        )
+        digits_sender = "".join(filter(str.isdigit, cleaned_sender))
+        normalized_phone = digits_sender
+        print("[WasenderWebhook] Phone extracted from senderPn:", normalized_phone)
+        if not (
+            normalized_phone.startswith("9647") and len(normalized_phone) == 13
+        ):
+            print("[WasenderWebhook] Invalid phone from senderPn:", normalized_phone)
+            return jsonify({"status": "ignored"}), 200
     else:
-        # drop any leading zeros/country codes and take last 9 digits
-        digits_trimmed = digits_only.lstrip("0")
-        local_part = digits_trimmed[-9:] if len(digits_trimmed) >= 9 else ""
+        print("[WasenderWebhook] senderPn missing, using fallback extraction")
+        phone_candidate = remote_jid or participant
+        if not phone_candidate:
+            print("[WasenderWebhook] NO PHONE FOUND - missing remoteJid/participant")
+            return jsonify({"status": "ignored"}), 200
 
-    if len(local_part) == 9:
-        normalized_phone = "964" + local_part
-    else:
-        normalized_phone = ""
+        phone_str = str(phone_candidate)
+        print("[WasenderWebhook] Raw phone value:", phone_str)
+        digits_only = "".join(filter(str.isdigit, phone_str))
+        print("[WasenderWebhook] Digits-only phone:", digits_only)
 
-    if len(normalized_phone) != 12 or not normalized_phone.startswith("964"):
-        print("[WasenderWebhook] Invalid phone after normalization:", normalized_phone or digits_only)
-        return jsonify({"status": "ignored"}), 200
+        local_part = ""
+        if digits_only.startswith("964"):
+            local_part = digits_only[3:]
+        else:
+            digits_trimmed = digits_only.lstrip("0")
+            local_part = digits_trimmed[-9:] if len(digits_trimmed) >= 9 else ""
+
+        if len(local_part) == 9:
+            normalized_phone = "964" + local_part
+        else:
+            normalized_phone = ""
+
+        if len(normalized_phone) != 12 or not normalized_phone.startswith("964"):
+            print(
+                "[WasenderWebhook] Invalid phone after fallback normalization:",
+                normalized_phone or digits_only,
+            )
+            return jsonify({"status": "ignored"}), 200
 
     print("[WasenderWebhook] Normalized phone:", normalized_phone)
-
-    response_payload = {"received": True}
     print("[WasenderWebhook] Data section:", data)
     name = data.get("pushName") or "Unknown"
 
