@@ -14,13 +14,16 @@ SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-ULTRAMSG_INSTANCE_ID = os.environ.get("ULTRAMSG_INSTANCE_ID")
-ULTRAMSG_TOKEN = os.environ.get("ULTRAMSG_TOKEN")
-ULTRAMSG_CHAT_URL = os.environ.get("ULTRAMSG_CHAT_URL")
-if not ULTRAMSG_CHAT_URL and ULTRAMSG_INSTANCE_ID:
-    ULTRAMSG_CHAT_URL = (
-        f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/chat"
-    )
+WASENDER_BASE_URL = (
+    os.environ.get("WASENDER_BASE_URL", "https://www.wasenderapi.com") or ""
+).rstrip("/")
+WASENDER_SEND_PATH = (os.environ.get("WASENDER_SEND_PATH") or "/api/sendMessage").lstrip(
+    "/"
+)
+WASENDER_AUTH_MODE = (os.environ.get("WASENDER_AUTH_MODE") or "token").lower()
+WASENDER_API_KEY = os.environ.get("WASENDER_API_KEY") or ""
+WASENDER_TOKEN = os.environ.get("WASENDER_TOKEN") or ""
+WASENDER_DEVICE_ID = os.environ.get("WASENDER_DEVICE_ID") or ""
 
 OWNER_WHATSAPP_NUMBER = "9647722602749"
 NOTIFICATION_INTERVAL_SECONDS = 60  # TEST MODE: notification check every 1 minute
@@ -157,26 +160,44 @@ def _build_message(rental, status_label, end_dt):
 
 
 def _send_whatsapp_message(message_body):
-    if not ULTRAMSG_CHAT_URL or not ULTRAMSG_TOKEN:
-        print("[RentalNotifier] UltraMsg credentials missing; cannot send message")
+    if not WASENDER_BASE_URL:
+        print("[RentalNotifier] Wasender base URL missing; cannot send message")
         return False
 
-    payload = {
-        "token": ULTRAMSG_TOKEN,
-        "to": OWNER_WHATSAPP_NUMBER,
-        "body": message_body,
-    }
+    url = f"{WASENDER_BASE_URL}/{WASENDER_SEND_PATH}"
+    headers = {}
+    payload = {}
+
+    if WASENDER_AUTH_MODE == "bearer":
+        if not WASENDER_API_KEY:
+            print("[RentalNotifier] Wasender API key missing; cannot send message")
+            return False
+        headers["Authorization"] = f"Bearer {WASENDER_API_KEY}"
+        payload = {"to": OWNER_WHATSAPP_NUMBER, "text": message_body}
+    else:
+        token = WASENDER_TOKEN or WASENDER_API_KEY
+        if not token:
+            print("[RentalNotifier] Wasender token missing; cannot send message")
+            return False
+        payload = {
+            "token": token,
+            "to": OWNER_WHATSAPP_NUMBER,
+            "message": message_body,
+        }
+        if WASENDER_DEVICE_ID:
+            payload["device_id"] = WASENDER_DEVICE_ID
+
     try:
-        response = requests.post(ULTRAMSG_CHAT_URL, data=payload, timeout=15)
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
     except requests.RequestException as exc:
-        print(f"[RentalNotifier] UltraMsg request failed: {exc}")
+        print(f"[RentalNotifier] Wasender request failed: {exc}")
         return False
 
     if response.ok:
-        print("[RentalNotifier] WhatsApp notification sent successfully")
+        print("[RentalNotifier] WhatsApp notification sent successfully via Wasender")
         return True
     print(
-        "[RentalNotifier] UltraMsg API responded with error "
+        "[RentalNotifier] Wasender API responded with error "
         f"(status={response.status_code} body={response.text})"
     )
     return False
@@ -256,12 +277,20 @@ def wasender_webhook():
     signature = request.headers.get("X-Webhook-Signature")
     print("[WasenderWebhook] Signature:", signature)
 
+    headers_dump = {k: v for k, v in request.headers.items()}
+    print("[WasenderWebhook] Headers:", headers_dump)
+
+    raw_body = request.get_data(as_text=True)
+    print("[WasenderWebhook] Raw body:", raw_body)
+
     payload = request.json or {}
     print("[WasenderWebhook] Payload:", payload)
+    response_payload = {"received": True}
 
     event = payload.get("event")
     if event != "messages.upsert":
-        return jsonify({"ignored": True}), 200
+        print("[WasenderWebhook] Non-upsert event ignored")
+        return jsonify(response_payload), 200
 
     data = payload.get("data") or {}
     phone = data.get("from")
@@ -269,7 +298,7 @@ def wasender_webhook():
 
     if not phone:
         print("[WasenderWebhook] Missing phone number")
-        return jsonify({"error": "missing phone"}), 200
+        return jsonify(response_payload), 200
 
     # Normalize Iraqi phone number
     digits = "".join(c for c in str(phone) if c.isdigit())
@@ -302,60 +331,12 @@ def wasender_webhook():
     except Exception as exc:
         print("[WasenderWebhook] Supabase error:", exc)
 
-    return jsonify({"received": True}), 200
+    return jsonify(response_payload), 200
 
 
 @app.route("/", methods=["GET"])
 def health_check():
     return "RealesrateCRM Webhook is running", 200
-
-
-@app.route("/ultramsg/webhook", methods=["POST"])
-def ultramsg_webhook():
-    data = request.json or {}
-
-    print("UltraMsg webhook received")
-    print(f"Incoming payload: {data}")
-
-    payload_data = data.get("data") or {}
-    message_info = data.get("message") or {}
-    sender_info = data.get("sender") or {}
-    phone = (
-        payload_data.get("from")
-        or payload_data.get("chatId")
-        or data.get("author")
-        or message_info.get("from")
-    )
-    if isinstance(phone, str):
-        phone = phone.replace("@c.us", "")
-    print(f"Extracted phone: {phone}")
-
-    name = (
-        data.get("notifyName")
-        or sender_info.get("name")
-        or sender_info.get("pushname")
-        or "Unknown"
-    )
-
-    if not phone:
-        print("Phone number not found in payload")
-        return "No phone", 200
-
-    # تحقق هل العميل موجود
-    existing = supabase.table("clients").select("id").eq("phone", phone).execute()
-
-    if not existing.data:
-        print("Inserting client into Supabase")
-        try:
-            supabase.table("clients").insert({
-                "phone": phone,
-                "name": name
-            }).execute()
-        except Exception as exc:
-            print(f"Supabase insertion failed: {exc}")
-            raise
-
-    return "OK", 200
 
 
 if __name__ == "__main__":
