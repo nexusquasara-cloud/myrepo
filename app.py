@@ -272,8 +272,8 @@ start_rental_notification_scheduler()
 
 @app.route("/wasender/webhook", methods=["POST"])
 def wasender_webhook():
+    print("[WasenderWebhook] ===== NEW REQUEST =====")
     print("[WasenderWebhook] Incoming webhook received")
-
     signature = request.headers.get("X-Webhook-Signature")
     print("[WasenderWebhook] Signature:", signature)
 
@@ -287,21 +287,34 @@ def wasender_webhook():
     print("[WasenderWebhook] Payload:", payload)
     response_payload = {"received": True}
 
-    event = payload.get("event")
-    if event != "messages.upsert":
-        print("[WasenderWebhook] Non-upsert event ignored")
+    event = payload.get("event") or ""
+    event = str(event)
+    print("[WasenderWebhook] Event type:", event)
+    if not event.startswith("messages"):
+        print("[WasenderWebhook] Non-message event ignored")
         return jsonify(response_payload), 200
 
     data = payload.get("data") or {}
-    phone = data.get("from")
+    print("[WasenderWebhook] Data section:", data)
+    message_block = data.get("message") or {}
+    key_block = data.get("key") or {}
+
+    phone = (
+        data.get("from")
+        or message_block.get("from")
+        or key_block.get("remoteJid")
+    )
     name = data.get("pushName") or "Unknown"
 
     if not phone:
         print("[WasenderWebhook] Missing phone number")
         return jsonify(response_payload), 200
 
+    raw_phone = str(phone)
+    raw_phone = raw_phone.replace("@s.whatsapp.net", "").replace("@c.us", "")
+
     # Normalize Iraqi phone number
-    digits = "".join(c for c in str(phone) if c.isdigit())
+    digits = "".join(c for c in raw_phone if c.isdigit())
     if digits.startswith("00"):
         digits = digits[2:]
     if digits.startswith("0"):
@@ -309,6 +322,7 @@ def wasender_webhook():
     if not digits.startswith("964"):
         digits = "964" + digits
     normalized_phone = digits
+    print("[WasenderWebhook] Extracted phone:", normalized_phone)
 
     try:
         existing = (
@@ -319,7 +333,7 @@ def wasender_webhook():
         )
         if existing.data:
             print("[WasenderWebhook] Client already exists:", normalized_phone)
-            return jsonify({"exists": True}), 200
+            return jsonify(response_payload), 200
 
         supabase.table("clients").insert({
             "phone": normalized_phone,
