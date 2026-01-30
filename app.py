@@ -203,6 +203,43 @@ def _send_whatsapp_message(message_body):
     return False
 
 
+def extract_sender_candidates(payload):
+    candidates = []
+
+    def record(path, value):
+        if value is None or value == "":
+            return
+        candidates.append((path, value))
+
+    def traverse(node, path):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                next_path = f"{path}.{key}" if path else key
+                if key in {"senderPn", "participant", "remoteJid", "from"}:
+                    record(next_path, value)
+                if isinstance(value, (dict, list)):
+                    traverse(value, next_path)
+        elif isinstance(node, list):
+            for idx, item in enumerate(node):
+                traverse(item, f"{path}[{idx}]")
+
+    traverse(payload, "payload")
+    return candidates
+
+
+def normalize_iraqi_phone_from_jid(value):
+    if value is None:
+        return None
+    text = str(value)
+    text = text.replace("@s.whatsapp.net", "").replace("@c.us", "")
+    if "@" in text:
+        text = text.split("@")[0]
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if digits.startswith("9647") and len(digits) == 13:
+        return digits
+    return None
+
+
 def _process_rental_list(rentals, notification_type):
     print(
         f"[RentalNotifier] Processing {len(rentals)} rentals "
@@ -281,83 +318,57 @@ def wasender_webhook():
     print("[WasenderWebhook] Event:", event)
 
     data = payload.get("data") or {}
-    messages = data.get("messages") or {}
-    if isinstance(messages, list):
-        messages = messages[0] if messages else {}
-    if not isinstance(messages, dict):
-        messages = {}
+    print("[WasenderWebhook] Data section:", data)
 
-    key_block = messages.get("key") or {}
-    if isinstance(key_block, list):
-        key_block = key_block[0] if key_block else {}
-    if not isinstance(key_block, dict):
-        key_block = {}
+    candidates = extract_sender_candidates(payload)
+    print("[WasenderWebhook] Phone candidates:", candidates)
 
-    remote_jid = key_block.get("remoteJid")
-    sender_pn = messages.get("senderPn")
-    participant = messages.get("participant")
+    normalized_phone = None
+    chosen_source = None
 
-    print("[WasenderWebhook] Extracted remoteJid:", remote_jid)
-    print("[WasenderWebhook] Extracted senderPn:", sender_pn)
-    print("[WasenderWebhook] Extracted participant:", participant)
+    def attempt_selection(keyword):
+        nonlocal normalized_phone, chosen_source
+        for label, value in candidates:
+            if keyword not in label.lower():
+                continue
+            print(f"[WasenderWebhook] Trying {label}: {value}")
+            normalized = normalize_iraqi_phone_from_jid(value)
+            if normalized:
+                normalized_phone = normalized
+                chosen_source = label
+                print(f"[WasenderWebhook] Accepted {label} -> {normalized}")
+                return True
+            print(f"[WasenderWebhook] Rejected {label}: not a valid Iraqi number")
+        return False
+
+    attempt_selection("senderpn")
+    if not normalized_phone:
+        print("[WasenderWebhook] senderPn missing or invalid, trying participant")
+        attempt_selection("participant")
+    if not normalized_phone:
+        print("[WasenderWebhook] Participant missing or invalid, trying remoteJid")
+        attempt_selection("remotejid")
+
+    if not normalized_phone:
+        print("[WasenderWebhook] No valid phone candidates found")
+        return jsonify({"status": "ignored", "reason": "no_valid_phone"}), 200
+
+    print(f"[WasenderWebhook] Normalized phone selected from {chosen_source}: {normalized_phone}")
 
     response_payload = {"received": True}
-    normalized_phone = None
-
-    if sender_pn:
-        cleaned_sender = (
-            str(sender_pn).replace("@s.whatsapp.net", "").replace("@c.us", "")
-        )
-        digits_sender = "".join(filter(str.isdigit, cleaned_sender))
-        normalized_phone = digits_sender
-        print("[WasenderWebhook] Phone extracted from senderPn:", normalized_phone)
-        if not (
-            normalized_phone.startswith("9647") and len(normalized_phone) == 13
-        ):
-            print("[WasenderWebhook] Invalid phone from senderPn:", normalized_phone)
-            return jsonify({"status": "ignored"}), 200
-    else:
-        print("[WasenderWebhook] senderPn missing, using fallback extraction")
-        phone_candidate = remote_jid or participant
-        if not phone_candidate:
-            print("[WasenderWebhook] NO PHONE FOUND - missing remoteJid/participant")
-            return jsonify({"status": "ignored"}), 200
-
-        phone_str = str(phone_candidate)
-        print("[WasenderWebhook] Raw phone value:", phone_str)
-        digits_only = "".join(filter(str.isdigit, phone_str))
-        print("[WasenderWebhook] Digits-only phone:", digits_only)
-
-        local_part = ""
-        if digits_only.startswith("964"):
-            local_part = digits_only[3:]
-        else:
-            digits_trimmed = digits_only.lstrip("0")
-            local_part = digits_trimmed[-9:] if len(digits_trimmed) >= 9 else ""
-
-        if len(local_part) == 9:
-            normalized_phone = "964" + local_part
-        else:
-            normalized_phone = ""
-
-        if len(normalized_phone) != 12 or not normalized_phone.startswith("964"):
-            print(
-                "[WasenderWebhook] Invalid phone after fallback normalization:",
-                normalized_phone or digits_only,
-            )
-            return jsonify({"status": "ignored"}), 200
-
-    print("[WasenderWebhook] Normalized phone:", normalized_phone)
-    print("[WasenderWebhook] Data section:", data)
-    name = data.get("pushName") or "Unknown"
+    name = data.get("pushName") or payload.get("pushName") or "Unknown"
 
     try:
-        print("[WasenderWebhook] Checking client existence in Supabase")
+        print("[WasenderWebhook] Checking client existence in Supabase for:", normalized_phone)
         existing = (
             supabase.table("clients")
             .select("id")
             .eq("phone", normalized_phone)
             .execute()
+        )
+        print(
+            "[WasenderWebhook] Supabase select response:",
+            {"data": existing.data, "error": getattr(existing, "error", None)},
         )
     except Exception as exc:
         print("[WasenderWebhook] Supabase query error:", exc)
@@ -368,10 +379,13 @@ def wasender_webhook():
         return jsonify(response_payload), 200
 
     try:
-        supabase.table("clients").insert({
-            "phone": normalized_phone,
-            "name": name
-        }).execute()
+        insert_payload = {"phone": normalized_phone, "name": name}
+        print("[WasenderWebhook] Supabase insert payload:", insert_payload)
+        insert_resp = supabase.table("clients").insert(insert_payload).execute()
+        print(
+            "[WasenderWebhook] Supabase insert response:",
+            {"data": insert_resp.data, "error": getattr(insert_resp, "error", None)},
+        )
         print("[WasenderWebhook] Client inserted:", normalized_phone)
     except Exception as exc:
         print("[WasenderWebhook] Client insert failed:", exc)
