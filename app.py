@@ -279,17 +279,36 @@ def wasender_webhook():
 
     data = payload.get("data") or {}
     messages = data.get("messages") or {}
+    if isinstance(messages, list):
+        messages = messages[0] if messages else {}
 
-    raw_sender = messages.get("senderPn")
-    sender_phone = None
-    if raw_sender:
-        sender_phone = raw_sender.replace("@s.whatsapp.net", "")
+    raw_phone = None
+    if isinstance(messages, dict):
+        raw_phone = messages.get("senderPn")
+        if not raw_phone:
+            raw_phone = messages.get("remoteJid")
+        if not raw_phone:
+            key_block = messages.get("key") or {}
+            raw_phone = key_block.get("remoteJid")
+    print("[WasenderWebhook] Raw phone value:", raw_phone)
 
-    if not sender_phone:
+    normalized_phone = ""
+    if raw_phone and isinstance(raw_phone, str):
+        cleaned = raw_phone.replace("@s.whatsapp.net", "").replace("@c.us", "")
+        digits_only = "".join(filter(str.isdigit, cleaned))
+        if digits_only.startswith("00"):
+            digits_only = digits_only[2:]
+        if digits_only.startswith("0"):
+            digits_only = "964" + digits_only[1:]
+        if digits_only and not digits_only.startswith("964"):
+            digits_only = "964" + digits_only
+        normalized_phone = digits_only
+
+    print("[WasenderWebhook] Normalized phone:", normalized_phone)
+
+    if not normalized_phone:
         print("[WasenderWebhook] senderPn not found")
         return jsonify({"status": "ignored"}), 200
-
-    print(f"[WasenderWebhook] senderPn value: {sender_phone}")
 
     response_payload = {"received": True}
 
@@ -304,22 +323,23 @@ def wasender_webhook():
     name = data.get("pushName") or "Unknown"
 
     try:
+        print("[WasenderWebhook] Checking client existence in Supabase")
         existing = (
             supabase.table("clients")
             .select("id")
-            .eq("phone", sender_phone)
+            .eq("phone", normalized_phone)
             .execute()
         )
         if existing.data:
-            print("[WasenderWebhook] Client already exists:", sender_phone)
+            print("[WasenderWebhook] Client already exists:", normalized_phone)
             return jsonify(response_payload), 200
 
         supabase.table("clients").insert({
-            "phone": sender_phone,
+            "phone": normalized_phone,
             "name": name
         }).execute()
 
-        print(f"[WasenderWebhook] Inserted phone: {sender_phone}")
+        print("[WasenderWebhook] Client inserted:", normalized_phone)
 
     except Exception as exc:
         print("[WasenderWebhook] Supabase error:", exc)
