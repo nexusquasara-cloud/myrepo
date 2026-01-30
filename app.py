@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import requests
-from flask import Flask
+from flask import Flask, request, jsonify
 from supabase import create_client
 
 app = Flask(__name__)
@@ -14,8 +14,13 @@ SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-WASENDER_BASE_URL = os.environ.get("WASENDER_BASE_URL", "https://www.wasenderapi.com")
-WASENDER_API_KEY = os.environ.get("WASENDER_API_KEY")
+ULTRAMSG_INSTANCE_ID = os.environ.get("ULTRAMSG_INSTANCE_ID")
+ULTRAMSG_TOKEN = os.environ.get("ULTRAMSG_TOKEN")
+ULTRAMSG_CHAT_URL = os.environ.get("ULTRAMSG_CHAT_URL")
+if not ULTRAMSG_CHAT_URL and ULTRAMSG_INSTANCE_ID:
+    ULTRAMSG_CHAT_URL = (
+        f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/chat"
+    )
 
 OWNER_WHATSAPP_NUMBER = "9647722602749"
 NOTIFICATION_INTERVAL_SECONDS = 60  # TEST MODE: notification check every 1 minute
@@ -151,54 +156,27 @@ def _build_message(rental, status_label, end_dt):
     )
 
 
-def _normalize_iraqi_number(phone):
-    if not phone:
-        return None
-    digits = "".join(char for char in str(phone) if char.isdigit())
-    if not digits:
-        return None
-    if digits.startswith("00"):
-        digits = digits[2:]
-    if digits.startswith("0"):
-        digits = "964" + digits[1:]
-    if not digits.startswith("964"):
-        digits = "964" + digits
-    return f"+{digits}"
-
-
 def _send_whatsapp_message(message_body):
-    if not WASENDER_API_KEY:
-        print("[RentalNotifier] WasenderAPI key missing; cannot send message")
-        return False
-
-    normalized = _normalize_iraqi_number(OWNER_WHATSAPP_NUMBER)
-    if not normalized:
-        print("[RentalNotifier] Invalid WhatsApp number; cannot send message")
+    if not ULTRAMSG_CHAT_URL or not ULTRAMSG_TOKEN:
+        print("[RentalNotifier] UltraMsg credentials missing; cannot send message")
         return False
 
     payload = {
-        "to": normalized,
-        "text": message_body,
+        "token": ULTRAMSG_TOKEN,
+        "to": OWNER_WHATSAPP_NUMBER,
+        "body": message_body,
     }
     try:
-        response = requests.post(
-            f"{WASENDER_BASE_URL.rstrip('/')}/api/send-message",
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {WASENDER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            timeout=15,
-        )
+        response = requests.post(ULTRAMSG_CHAT_URL, data=payload, timeout=15)
     except requests.RequestException as exc:
-        print(f"[RentalNotifier] WasenderAPI request failed: {exc}")
+        print(f"[RentalNotifier] UltraMsg request failed: {exc}")
         return False
 
     if response.ok:
         print("[RentalNotifier] WhatsApp notification sent successfully")
         return True
     print(
-        "[RentalNotifier] WasenderAPI responded with error "
+        "[RentalNotifier] UltraMsg API responded with error "
         f"(status={response.status_code} body={response.text})"
     )
     return False
@@ -271,9 +249,113 @@ def start_rental_notification_scheduler():
 start_rental_notification_scheduler()
 
 
+@app.route("/wasender/webhook", methods=["POST"])
+def wasender_webhook():
+    print("[WasenderWebhook] Incoming webhook received")
+
+    signature = request.headers.get("X-Webhook-Signature")
+    print("[WasenderWebhook] Signature:", signature)
+
+    payload = request.json or {}
+    print("[WasenderWebhook] Payload:", payload)
+
+    event = payload.get("event")
+    if event != "messages.upsert":
+        return jsonify({"ignored": True}), 200
+
+    data = payload.get("data") or {}
+    phone = data.get("from")
+    name = data.get("pushName") or "Unknown"
+
+    if not phone:
+        print("[WasenderWebhook] Missing phone number")
+        return jsonify({"error": "missing phone"}), 200
+
+    # Normalize Iraqi phone number
+    digits = "".join(c for c in str(phone) if c.isdigit())
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if digits.startswith("0"):
+        digits = "964" + digits[1:]
+    if not digits.startswith("964"):
+        digits = "964" + digits
+    normalized_phone = digits
+
+    try:
+        existing = (
+            supabase.table("clients")
+            .select("id")
+            .eq("phone", normalized_phone)
+            .execute()
+        )
+        if existing.data:
+            print("[WasenderWebhook] Client already exists:", normalized_phone)
+            return jsonify({"exists": True}), 200
+
+        supabase.table("clients").insert({
+            "phone": normalized_phone,
+            "name": name
+        }).execute()
+
+        print("[WasenderWebhook] Client inserted:", normalized_phone)
+
+    except Exception as exc:
+        print("[WasenderWebhook] Supabase error:", exc)
+
+    return jsonify({"received": True}), 200
+
+
 @app.route("/", methods=["GET"])
 def health_check():
     return "RealesrateCRM Webhook is running", 200
+
+
+@app.route("/ultramsg/webhook", methods=["POST"])
+def ultramsg_webhook():
+    data = request.json or {}
+
+    print("UltraMsg webhook received")
+    print(f"Incoming payload: {data}")
+
+    payload_data = data.get("data") or {}
+    message_info = data.get("message") or {}
+    sender_info = data.get("sender") or {}
+    phone = (
+        payload_data.get("from")
+        or payload_data.get("chatId")
+        or data.get("author")
+        or message_info.get("from")
+    )
+    if isinstance(phone, str):
+        phone = phone.replace("@c.us", "")
+    print(f"Extracted phone: {phone}")
+
+    name = (
+        data.get("notifyName")
+        or sender_info.get("name")
+        or sender_info.get("pushname")
+        or "Unknown"
+    )
+
+    if not phone:
+        print("Phone number not found in payload")
+        return "No phone", 200
+
+    # تحقق هل العميل موجود
+    existing = supabase.table("clients").select("id").eq("phone", phone).execute()
+
+    if not existing.data:
+        print("Inserting client into Supabase")
+        try:
+            supabase.table("clients").insert({
+                "phone": phone,
+                "name": name
+            }).execute()
+        except Exception as exc:
+            print(f"Supabase insertion failed: {exc}")
+            raise
+
+    return "OK", 200
 
 
 if __name__ == "__main__":
