@@ -304,14 +304,15 @@ def start_rental_notification_scheduler():
     worker.start()
 
 
-start_rental_notification_scheduler()
-
-
 @app.route("/wasender/webhook", methods=["POST"])
 def wasender_webhook():
     print("[WasenderWebhook] ===== NEW REQUEST =====")
+    print("[WasenderWebhook] Method:", request.method)
+    print("[WasenderWebhook] Headers:", dict(request.headers))
+    raw_body = request.get_json(silent=True)
+    print("[WasenderWebhook] Raw JSON:", raw_body)
 
-    payload = request.get_json(silent=True) or {}
+    payload = raw_body or {}
     print("[WasenderWebhook] Raw payload:", payload)
 
     event = str(payload.get("event") or "")
@@ -393,10 +394,12 @@ def wasender_webhook():
     return jsonify(response_payload), 200
 
 
+@app.before_first_request
+def start_background_tasks():
+    print("[BOOT] Starting background scheduler safely")
+    start_rental_notification_scheduler()
+
+
 @app.route("/", methods=["GET"])
 def health_check():
     return "RealesrateCRM Webhook is running", 200
-
-
-if __name__ == "__main__":
-    app.run()
