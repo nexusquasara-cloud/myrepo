@@ -277,25 +277,34 @@ def wasender_webhook():
     payload = request.get_json(silent=True) or {}
     print("[WasenderWebhook] Payload:", payload)
 
-    phone = None
+    data = payload.get("data") or {}
+    messages = data.get("messages") or {}
 
-    try:
-        messages = payload.get("data", {}).get("messages", {})
-        phone = messages.get("senderPn") or messages.get("from")
-    except Exception as e:
-        print("[WasenderWebhook] Error extracting phone:", e)
+    raw_phone = (
+        messages.get("senderPn")
+        or (messages.get("key") or {}).get("remoteJid")
+        or (messages.get("key") or {}).get("participant")
+    )
+    print("[WasenderWebhook] Raw phone value:", raw_phone)
 
-    if phone and "@s.whatsapp.net" in phone:
-        phone = phone.split("@")[0]
+    if raw_phone and isinstance(raw_phone, str):
+        raw_phone = raw_phone.replace("@s.whatsapp.net", "").replace("@c.us", "")
 
-    if phone:
-        phone = "".join(filter(str.isdigit, phone))
+    digits_only = "".join(filter(str.isdigit, raw_phone or ""))
 
-    if not phone:
+    if digits_only.startswith("00"):
+        digits_only = digits_only[2:]
+    if digits_only.startswith("0"):
+        digits_only = "964" + digits_only[1:]
+    if digits_only and not digits_only.startswith("964"):
+        digits_only = "964" + digits_only
+
+    normalized_phone = digits_only
+    print("[WasenderWebhook] Normalized phone:", normalized_phone)
+
+    if not normalized_phone:
         print("[WasenderWebhook] Missing phone number")
         return jsonify({"status": "ignored"}), 200
-
-    print(f"[WasenderWebhook] Extracted phone: {phone}")
 
     response_payload = {"received": True}
 
@@ -306,28 +315,8 @@ def wasender_webhook():
         print("[WasenderWebhook] Non-message event ignored")
         return jsonify(response_payload), 200
 
-    data = payload.get("data") or {}
     print("[WasenderWebhook] Data section:", data)
-    message_block = data.get("message") or {}
-    key_block = data.get("key") or {}
-    sender_pn = data.get("senderPn")
     name = data.get("pushName") or "Unknown"
-
-    raw_phone = str(phone)
-    raw_phone = raw_phone.replace("@s.whatsapp.net", "").replace("@c.us", "")
-
-    # Normalize Iraqi phone number
-    digits = "".join(c for c in raw_phone if c.isdigit())
-    if digits.startswith("00"):
-        digits = digits[2:]
-    if digits.startswith("0"):
-        digits = "964" + digits[1:]
-    if not digits.startswith("964"):
-        digits = "964" + digits
-    normalized_phone = digits
-    if phone_source == "data.senderPn":
-        print("[WasenderWebhook] Phone extracted from senderPn:", normalized_phone)
-    print("[WasenderWebhook] Extracted phone:", normalized_phone)
 
     try:
         existing = (
