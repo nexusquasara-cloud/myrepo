@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask
 from supabase import create_client
 
 app = Flask(__name__)
@@ -14,37 +14,18 @@ SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-WASENDER_BASE_URL = (
-    os.environ.get("WASENDER_BASE_URL", "https://www.wasenderapi.com") or ""
-).rstrip("/")
-WASENDER_SEND_PATH = (os.environ.get("WASENDER_SEND_PATH") or "/api/sendMessage").lstrip(
-    "/"
-)
-WASENDER_AUTH_MODE = (os.environ.get("WASENDER_AUTH_MODE") or "token").lower()
-WASENDER_API_KEY = os.environ.get("WASENDER_API_KEY") or ""
-WASENDER_TOKEN = os.environ.get("WASENDER_TOKEN") or ""
-WASENDER_DEVICE_ID = os.environ.get("WASENDER_DEVICE_ID") or ""
-
-TEST_MODE = True
+WASENDER_BASE_URL = os.environ.get("WASENDER_BASE_URL", "https://www.wasenderapi.com")
+WASENDER_API_KEY = os.environ.get("WASENDER_API_KEY")
 
 OWNER_WHATSAPP_NUMBER = "9647722602749"
+NOTIFICATION_INTERVAL_SECONDS = 60  # TEST MODE: notification check every 1 minute
 NOTIFICATION_LOOKAHEAD_DAYS = 7
-TEST_MODE_LOOKAHEAD_SECONDS = 60
-NOTIFICATION_INTERVAL_SECONDS = 5 if TEST_MODE else 60
-LOOKAHEAD_WINDOW_SECONDS = (
-    TEST_MODE_LOOKAHEAD_SECONDS if TEST_MODE else NOTIFICATION_LOOKAHEAD_DAYS * 86400
-)
 STATUS_LABELS = {"overdue": "Overdue", "expiring": "Expiring Soon"}
 
 
 def fetch_rentals_from_supabase():
     now = datetime.now(timezone.utc)
-    lookahead_delta = (
-        timedelta(seconds=TEST_MODE_LOOKAHEAD_SECONDS)
-        if TEST_MODE
-        else timedelta(days=NOTIFICATION_LOOKAHEAD_DAYS)
-    )
-    upcoming_limit = now + lookahead_delta
+    upcoming_limit = now + timedelta(days=NOTIFICATION_LOOKAHEAD_DAYS)
     print(
         "[RentalNotifier] Fetching rentals. "
         f"Now={now.isoformat()} UpcomingLimit={upcoming_limit.isoformat()}"
@@ -170,111 +151,57 @@ def _build_message(rental, status_label, end_dt):
     )
 
 
+def _normalize_iraqi_number(phone):
+    if not phone:
+        return None
+    digits = "".join(char for char in str(phone) if char.isdigit())
+    if not digits:
+        return None
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if digits.startswith("0"):
+        digits = "964" + digits[1:]
+    if not digits.startswith("964"):
+        digits = "964" + digits
+    return f"+{digits}"
+
+
 def _send_whatsapp_message(message_body):
-    if not WASENDER_BASE_URL:
-        print("[RentalNotifier] Wasender base URL missing; cannot send message")
+    if not WASENDER_API_KEY:
+        print("[RentalNotifier] WasenderAPI key missing; cannot send message")
         return False
 
-    url = f"{WASENDER_BASE_URL}/{WASENDER_SEND_PATH}"
-    headers = {}
-    payload = {}
+    normalized = _normalize_iraqi_number(OWNER_WHATSAPP_NUMBER)
+    if not normalized:
+        print("[RentalNotifier] Invalid WhatsApp number; cannot send message")
+        return False
 
-    if WASENDER_AUTH_MODE == "bearer":
-        if not WASENDER_API_KEY:
-            print("[RentalNotifier] Wasender API key missing; cannot send message")
-            return False
-        headers["Authorization"] = f"Bearer {WASENDER_API_KEY}"
-        payload = {"to": OWNER_WHATSAPP_NUMBER, "text": message_body}
-    else:
-        token = WASENDER_TOKEN or WASENDER_API_KEY
-        if not token:
-            print("[RentalNotifier] Wasender token missing; cannot send message")
-            return False
-        payload = {
-            "token": token,
-            "to": OWNER_WHATSAPP_NUMBER,
-            "message": message_body,
-        }
-        if WASENDER_DEVICE_ID:
-            payload["device_id"] = WASENDER_DEVICE_ID
-
+    payload = {
+        "to": normalized,
+        "text": message_body,
+    }
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        response = requests.post(
+            f"{WASENDER_BASE_URL.rstrip('/')}/api/send-message",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {WASENDER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
     except requests.RequestException as exc:
-        print(f"[RentalNotifier] Wasender request failed: {exc}")
+        print(f"[RentalNotifier] WasenderAPI request failed: {exc}")
         return False
 
     if response.ok:
-        print("[RentalNotifier] WhatsApp notification sent successfully via Wasender")
+        print("[RentalNotifier] WhatsApp notification sent successfully")
         return True
     print(
-        "[RentalNotifier] Wasender API responded with error "
+        "[RentalNotifier] WasenderAPI responded with error "
         f"(status={response.status_code} body={response.text})"
     )
     return False
-
-
-def extract_sender_candidates(payload):
-    candidates = []
-
-    def record(path, value):
-        if value is None or value == "":
-            return
-        candidates.append((path, value))
-
-    def traverse(node, path):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                next_path = f"{path}.{key}" if path else key
-                if key in {"senderPn", "participant", "remoteJid", "from"}:
-                    record(next_path, value)
-                if isinstance(value, (dict, list)):
-                    traverse(value, next_path)
-        elif isinstance(node, list):
-            for idx, item in enumerate(node):
-                traverse(item, f"{path}[{idx}]")
-
-    traverse(payload, "payload")
-    return candidates
-
-
-def normalize_iraqi_phone_from_jid(value):
-    if value is None:
-        return None
-    text = str(value)
-    text = text.replace("@s.whatsapp.net", "").replace("@c.us", "")
-    if "@" in text:
-        text = text.split("@")[0]
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if digits.startswith("9647") and len(digits) == 13:
-        return digits
-    return None
-
-
-def _log_rental_debug(rental):
-    now = datetime.now(timezone.utc)
-    start_dt = _parse_datetime(rental.get("start_datetime"))
-    end_dt = _parse_datetime(rental.get("end_datetime"))
-    remaining_seconds = None
-    if end_dt:
-        remaining_seconds = (end_dt - now).total_seconds()
-
-    status = "unknown"
-    if remaining_seconds is not None:
-        if remaining_seconds <= 0:
-            status = "overdue"
-        elif remaining_seconds <= LOOKAHEAD_WINDOW_SECONDS:
-            status = "expiring"
-        else:
-            status = "active"
-
-    print(
-        "[RentalNotifier] Rental debug -> "
-        f"id={rental.get('id')} now={now.isoformat()} "
-        f"start={start_dt.isoformat() if start_dt else 'N/A'} "
-        f"end={end_dt.isoformat() if end_dt else 'N/A'} "
-        f"remaining={remaining_seconds} status={status}"
-    )
 
 
 def _process_rental_list(rentals, notification_type):
@@ -284,7 +211,6 @@ def _process_rental_list(rentals, notification_type):
     )
     sent_count = 0
     for rental in rentals:
-        _log_rental_debug(rental)
         rental_id = rental.get("id")
         end_dt = _parse_datetime(rental.get("end_datetime"))
         if rental_id is None or not end_dt:
@@ -342,102 +268,13 @@ def start_rental_notification_scheduler():
     worker.start()
 
 
-@app.route("/wasender/webhook", methods=["POST"])
-def wasender_webhook():
-    print("[WasenderWebhook] ===== NEW REQUEST =====")
-    print("[WasenderWebhook] Method:", request.method)
-    print("[WasenderWebhook] Headers:", dict(request.headers))
-    raw_body = request.get_json(silent=True)
-    print("[WasenderWebhook] Raw JSON:", raw_body)
-
-    payload = raw_body or {}
-    print("[WasenderWebhook] Raw payload:", payload)
-
-    event = str(payload.get("event") or "")
-    print("[WasenderWebhook] Event:", event)
-
-    data = payload.get("data") or {}
-    print("[WasenderWebhook] Data section:", data)
-
-    candidates = extract_sender_candidates(payload)
-    print("[WasenderWebhook] Phone candidates:", candidates)
-
-    normalized_phone = None
-    chosen_source = None
-
-    def attempt_selection(keyword):
-        nonlocal normalized_phone, chosen_source
-        for label, value in candidates:
-            if keyword not in label.lower():
-                continue
-            print(f"[WasenderWebhook] Trying {label}: {value}")
-            normalized = normalize_iraqi_phone_from_jid(value)
-            if normalized:
-                normalized_phone = normalized
-                chosen_source = label
-                print(f"[WasenderWebhook] Accepted {label} -> {normalized}")
-                return True
-            print(f"[WasenderWebhook] Rejected {label}: not a valid Iraqi number")
-        return False
-
-    attempt_selection("senderpn")
-    if not normalized_phone:
-        print("[WasenderWebhook] senderPn missing or invalid, trying participant")
-        attempt_selection("participant")
-    if not normalized_phone:
-        print("[WasenderWebhook] Participant missing or invalid, trying remoteJid")
-        attempt_selection("remotejid")
-
-    if not normalized_phone:
-        print("[WasenderWebhook] No valid phone candidates found")
-        return jsonify({"status": "ignored", "reason": "no_valid_phone"}), 200
-
-    print(f"[WasenderWebhook] Normalized phone selected from {chosen_source}: {normalized_phone}")
-
-    response_payload = {"received": True}
-    name = data.get("pushName") or payload.get("pushName") or "Unknown"
-
-    try:
-        print("[WasenderWebhook] Checking client existence in Supabase for:", normalized_phone)
-        existing = (
-            supabase.table("clients")
-            .select("id")
-            .eq("phone", normalized_phone)
-            .execute()
-        )
-        print(
-            "[WasenderWebhook] Supabase select response:",
-            {"data": existing.data, "error": getattr(existing, "error", None)},
-        )
-    except Exception as exc:
-        print("[WasenderWebhook] Supabase query error:", exc)
-        return jsonify(response_payload), 200
-
-    if existing.data:
-        print("[WasenderWebhook] Client already exists:", normalized_phone)
-        return jsonify(response_payload), 200
-
-    try:
-        insert_payload = {"phone": normalized_phone, "name": name}
-        print("[WasenderWebhook] Supabase insert payload:", insert_payload)
-        insert_resp = supabase.table("clients").insert(insert_payload).execute()
-        print(
-            "[WasenderWebhook] Supabase insert response:",
-            {"data": insert_resp.data, "error": getattr(insert_resp, "error", None)},
-        )
-        print("[WasenderWebhook] Client inserted:", normalized_phone)
-    except Exception as exc:
-        print("[WasenderWebhook] Client insert failed:", exc)
-
-    return jsonify(response_payload), 200
-
-
-@app.before_first_request
-def start_background_tasks():
-    print("[BOOT] Starting background scheduler safely")
-    start_rental_notification_scheduler()
+start_rental_notification_scheduler()
 
 
 @app.route("/", methods=["GET"])
 def health_check():
     return "RealesrateCRM Webhook is running", 200
+
+
+if __name__ == "__main__":
+    app.run()
