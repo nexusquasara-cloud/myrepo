@@ -229,32 +229,6 @@ def _generate_request_id(headers):
     )
 
 
-def _extract_phone_candidates(message, data_section):
-    key_obj = message.get("key") if isinstance(message.get("key"), dict) else {}
-    data_key_obj = data_section.get("key") if isinstance(data_section.get("key"), dict) else {}
-
-    candidates = [
-        ("data.messages[0].cleanedSenderPn", message.get("cleanedSenderPn")),
-        ("data.messages[0].senderPn", message.get("senderPn")),
-    ]
-
-    fallback_paths = [
-        ("data.messages[0].participant", message.get("participant")),
-        ("data.messages[0].sender", message.get("sender")),
-        ("data.messages[0].from", message.get("from")),
-        ("data.messages[0].chatId", message.get("chatId")),
-        ("data.messages[0].key.participant", key_obj.get("participant")),
-        ("data.senderId", data_section.get("senderId")),
-        ("data.cleanedSenderPn", data_section.get("cleanedSenderPn")),
-        ("data.senderPn", data_section.get("senderPn")),
-        ("data.from", data_section.get("from")),
-        ("data.chatId", data_section.get("chatId")),
-    ]
-    candidates.extend(fallback_paths)
-    candidates.append(("data.key.remoteJid", data_key_obj.get("remoteJid")))
-    return candidates
-
-
 def _normalize_incoming_phone(value):
     if value is None:
         return None, "", "empty value"
@@ -496,6 +470,7 @@ def wasender_webhook():
         push_name = message.get("pushName") or "Unknown"
         print(f"{log_prefix} [MessageUpsert] pushName raw: {message.get('pushName')} chosen: {push_name}")
 
+        # Build ordered list of potential phone sources (strict priority).
         candidate_order = [
             ("data.messages[0].cleanedSenderPn", message.get("cleanedSenderPn")),
             ("data.messages[0].senderPn", message.get("senderPn")),
@@ -515,8 +490,12 @@ def wasender_webhook():
             if not digits:
                 print(f"{log_prefix} [MessageUpsert] Field {path} rejected (no digits). Raw={raw_value}")
                 continue
-            if not digits.startswith("964"):
-                print(f"{log_prefix} [MessageUpsert] Field {path} rejected (not 964). Digits={digits}")
+            if digits.startswith("07") and len(digits) == 11:
+                digits = "964" + digits[1:]
+            if digits.startswith("00"):
+                digits = digits[2:]
+            if not (digits.startswith("9647") and len(digits) == 13):
+                print(f"{log_prefix} [MessageUpsert] Field {path} rejected (not iraqi mobile). Digits={digits}")
                 continue
             normalized_phone = f"+{digits}"
             source_used = path
