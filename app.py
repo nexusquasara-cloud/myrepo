@@ -250,14 +250,23 @@ def log_notification(rental_id, notification_type):
 def _parse_datetime(value):
     if not value:
         return None
-    if isinstance(value, str):
-        normalized = value.replace("Z", "+00:00")
-    else:
-        normalized = value
     try:
-        return datetime.fromisoformat(normalized)
-    except ValueError:
-        print(f"[RentalNotifier] Failed to parse datetime: {value}")
+        # Normalize string
+        if isinstance(value, str):
+            value = value.replace("Z", "+00:00")
+
+        dt = datetime.fromisoformat(value)
+
+        # If datetime is naive (no timezone), assume local time
+        if dt.tzinfo is None:
+            local_dt = dt.astimezone()        # attach local timezone
+            return local_dt.astimezone(timezone.utc)
+
+        # If already timezone-aware, convert to UTC
+        return dt.astimezone(timezone.utc)
+
+    except Exception as exc:
+        print(f"[RentalNotifier] Failed to parse datetime: {value} ({exc})")
         return None
 
 
