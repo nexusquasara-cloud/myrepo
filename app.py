@@ -230,34 +230,28 @@ def _generate_request_id(headers):
 
 
 def _extract_phone_candidates(message, data_section):
-    candidates = []
-    mapping = [
+    key_obj = message.get("key") if isinstance(message.get("key"), dict) else {}
+    data_key_obj = data_section.get("key") if isinstance(data_section.get("key"), dict) else {}
+
+    candidates = [
         ("data.messages[0].cleanedSenderPn", message.get("cleanedSenderPn")),
         ("data.messages[0].senderPn", message.get("senderPn")),
+    ]
+
+    fallback_paths = [
         ("data.messages[0].participant", message.get("participant")),
         ("data.messages[0].sender", message.get("sender")),
         ("data.messages[0].from", message.get("from")),
         ("data.messages[0].chatId", message.get("chatId")),
-        (
-            "data.messages[0].key.participant",
-            message.get("key", {}).get("participant")
-            if isinstance(message.get("key"), dict)
-            else None,
-        ),
+        ("data.messages[0].key.participant", key_obj.get("participant")),
+        ("data.senderId", data_section.get("senderId")),
         ("data.cleanedSenderPn", data_section.get("cleanedSenderPn")),
         ("data.senderPn", data_section.get("senderPn")),
-        ("data.senderId", data_section.get("senderId")),
         ("data.from", data_section.get("from")),
         ("data.chatId", data_section.get("chatId")),
-        (
-            "data.key.remoteJid",
-            data_section.get("key", {}).get("remoteJid")
-            if isinstance(data_section.get("key"), dict)
-            else None,
-        ),
     ]
-    for path, value in mapping:
-        candidates.append((path, value))
+    candidates.extend(fallback_paths)
+    candidates.append(("data.key.remoteJid", data_key_obj.get("remoteJid")))
     return candidates
 
 
@@ -275,8 +269,10 @@ def _normalize_incoming_phone(value):
         return None, "", "no digits found"
     if digits.startswith("07") and len(digits) == 11:
         digits = "964" + digits[1:]
+    if digits.startswith("00"):
+        digits = digits[2:]
     if digits.startswith("9647") and len(digits) == 13:
-        return digits, digits, None
+        return f"+{digits}", digits, None
     return None, digits, "not iraqi mobile"
 
 
@@ -503,6 +499,7 @@ def wasender_webhook():
         candidates = _extract_phone_candidates(message, data_section)
         normalized_phone = None
         source_used = None
+        tried_paths = []
         for path, value in candidates:
             normalized, digits_only, reason = _normalize_incoming_phone(value)
             status = (
@@ -513,6 +510,7 @@ def wasender_webhook():
             print(
                 f"{log_prefix} [MessageUpsert] Candidate {path}: value={value} digits={digits_only} status={status}"
             )
+            tried_paths.append(path)
             if normalized:
                 normalized_phone = normalized
                 source_used = path
@@ -521,9 +519,9 @@ def wasender_webhook():
         if normalized_phone is None:
             print(f"{log_prefix} [MessageUpsert] No reliable phone found; message skipped")
             print(
-                f"{log_prefix} [MessageUpsert] Candidate paths tried: "
-                f"{[path for path, _ in candidates]}"
+                f"{log_prefix} [MessageUpsert] Candidate paths tried: {tried_paths}"
             )
+            print(f"{log_prefix} [MessageUpsert] Full payload: {payload}")
             return (
                 {"status": "ignored", "reason": "no_valid_phone", "debug": {"event": event_name}},
                 200,
