@@ -355,35 +355,47 @@ def wasender_webhook():
         print("[WasenderWebhook] Missing data section; skipping event")
         return "OK", 200
 
-    sender_phone_raw = None
     key_section = data_section.get("key")
     print(f"[WasenderWebhook][DEBUG] key section: {key_section}")
     if isinstance(key_section, dict):
         print(f"[WasenderWebhook][DEBUG] key keys: {list(key_section.keys())}")
-    if isinstance(key_section, dict):
-        sender_phone_raw = key_section.get("remoteJid")
-    print(f"[WasenderWebhook] remoteJid extracted: {sender_phone_raw}")
-    print(f"[WasenderWebhook][DEBUG] data.from = {data_section.get('from')}")
-    print(f"[WasenderWebhook][DEBUG] data.chatId = {data_section.get('chatId')}")
-    print(
-        f"[WasenderWebhook][DEBUG] data.key.remoteJid = "
-        f"{(data_section.get('key') or {}).get('remoteJid')}"
-    )
-    print(f"[WasenderWebhook][DEBUG] data.participant = {data_section.get('participant')}")
-    print(f"[WasenderWebhook][DEBUG] data.sender = {data_section.get('sender')}")
-    print(f"[WasenderWebhook][DEBUG] RAW sender_phone_raw = {sender_phone_raw}")
+
+    attempts = []
+    attempts.append(("data.from", data_section.get("from")))
+    attempts.append(("data.chatId", data_section.get("chatId")))
+    key_remote = key_section.get("remoteJid") if isinstance(key_section, dict) else None
+    attempts.append(("data.key.remoteJid", key_remote))
+    messages_remote = None
+    messages = data_section.get("messages")
+    if isinstance(messages, list) and messages:
+        first_msg = messages[0]
+        if isinstance(first_msg, dict):
+            msg_key = first_msg.get("key")
+            if isinstance(msg_key, dict):
+                messages_remote = msg_key.get("remoteJid")
+    attempts.append(("data.messages[0].key.remoteJid", messages_remote))
+
+    sender_phone_raw = None
+    for label, value in attempts:
+        print(f"[WasenderWebhook][DEBUG] Trying phone from {label}: {value}")
+        if value:
+            sender_phone_raw = value
+            break
+
+    if sender_phone_raw is None:
+        print("[WasenderWebhook][ERROR] Could not extract sender phone from payload")
+        print(f"[WasenderWebhook][ERROR] Full payload: {payload}")
+        return "OK", 200
 
     if isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@c.us"):
         sender_phone_raw = sender_phone_raw[:-4]
+    print(f"[WasenderWebhook][DEBUG] RAW sender_phone_raw = {sender_phone_raw}")
 
-    if sender_phone_raw is not None:
-        digits = "".join(char for char in str(sender_phone_raw) if char.isdigit())
-    else:
-        digits = ""
+    digits = "".join(char for char in str(sender_phone_raw) if char.isdigit())
     print(f"[WasenderWebhook][DEBUG] Normalized digits = {digits}")
 
     normalized_phone = _normalize_iraqi_number(sender_phone_raw)
-    print(f"[WasenderWebhook][DEBUG] Final normalized phone = {normalized_phone}")
+    print(f"[WasenderWebhook][DEBUG] Phone normalized to: {normalized_phone}")
     if not normalized_phone:
         print("[WasenderWebhook] Invalid phone after normalization; skipping")
         return "OK", 200
@@ -407,10 +419,13 @@ def wasender_webhook():
         print("[WasenderWebhook] Client already exists")
         return "OK", 200
 
-    print(
-        "[WasenderWebhook][DEBUG] Skipping Supabase insert during debugging; "
-        f"would insert ({normalized_phone}, {sender_name})"
-    )
+    try:
+        supabase.table("clients").insert(
+            {"phone": normalized_phone, "name": sender_name}
+        ).execute()
+        print("[WasenderWebhook] New client inserted successfully")
+    except Exception as exc:
+        print(f"[WasenderWebhook] Failed to insert new client: {exc}")
 
     return "OK", 200
 
