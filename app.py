@@ -346,18 +346,14 @@ def wasender_webhook():
         print("[WasenderWebhook] Missing data section; skipping event")
         return "OK", 200
 
-    sender_phone_raw = (
-        data_section.get("from")
-        or data_section.get("chatId")
-        or (
-            data_section.get("key", {}).get("remoteJid")
-            if isinstance(data_section.get("key"), dict)
-            else None
-        )
-    )
+    sender_phone_raw = None
+    key_section = data_section.get("key")
+    if isinstance(key_section, dict):
+        sender_phone_raw = key_section.get("remoteJid")
+    print(f"[WasenderWebhook] remoteJid extracted: {sender_phone_raw}")
+
     if isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@c.us"):
         sender_phone_raw = sender_phone_raw[:-4]
-    print(f"[WasenderWebhook] Phone extracted: {sender_phone_raw}")
 
     normalized_phone = _normalize_iraqi_number(sender_phone_raw)
     if not normalized_phone:
