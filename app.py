@@ -22,6 +22,7 @@ WASENDER_API_KEY = os.environ.get("WASENDER_API_KEY")
 DEBUG_WEBHOOK = os.environ.get("DEBUG_WEBHOOK") == "1"
 BASE_DIR = Path(__file__).resolve().parent
 WEBHOOK_DUMP_DIR = BASE_DIR / "webhook_dumps"
+IN_WEBHOOK_CONTEXT = False
 
 OWNER_WHATSAPP_NUMBER = "9647722602749"
 NOTIFICATION_INTERVAL_SECONDS = 60  # TEST MODE: notification check every 1 minute
@@ -455,6 +456,9 @@ def _resolve_sender_name(payload, data_section, message):
 
 
 def _send_whatsapp_message(message_body):
+    if IN_WEBHOOK_CONTEXT:
+        print("[SECURITY] BLOCKED WhatsApp send during webhook processing")
+        return False
     if not WASENDER_API_KEY:
         print("[RentalNotifier] WasenderAPI key missing; cannot send message")
         return False
@@ -471,10 +475,7 @@ def _send_whatsapp_message(message_body):
     }
 
     if payload["to"] != normalized_owner:
-        print(
-            "[RentalNotifier] ERROR: Attempted to send WhatsApp message to unauthorized destination "
-            f"{payload['to']}; aborting"
-        )
+        print("[SECURITY] BLOCKED send to non-owner number")
         return False
 
     try:
@@ -575,208 +576,213 @@ def health_check():
 
 @app.route("/wasender/webhook", methods=["POST"])
 def wasender_webhook():
-    req_id = _generate_request_id()
-    log_prefix = f"[WasenderWebhook][{req_id}]"
-    payload = request.get_json(silent=True) or {}
-    event_name = payload.get("event")
-    normalized_event = _normalize_event_key(event_name)
-    data_section = payload.get("data") or {}
-    print(f"{log_prefix} Event received: {event_name}")
-    _persist_webhook_payload(req_id, normalized_event or event_name, payload)
+    global IN_WEBHOOK_CONTEXT
+    IN_WEBHOOK_CONTEXT = True
+    try:
+        req_id = _generate_request_id()
+        log_prefix = f"[WasenderWebhook][{req_id}]"
+        payload = request.get_json(silent=True) or {}
+        event_name = payload.get("event")
+        normalized_event = _normalize_event_key(event_name)
+        data_section = payload.get("data") or {}
+        print(f"{log_prefix} Event received: {event_name}")
+        _persist_webhook_payload(req_id, normalized_event or event_name, payload)
 
-    if normalized_event == "contacts.upsert":
-        print(f"{log_prefix} [ContactsUpsert] Full payload: {payload}")
-        if not isinstance(data_section, dict):
-            print(f"{log_prefix} [ContactsUpsert] Missing data section; skipping")
+        if normalized_event == "contacts.upsert":
+            print(f"{log_prefix} [ContactsUpsert] Full payload: {payload}")
+            if not isinstance(data_section, dict):
+                print(f"{log_prefix} [ContactsUpsert] Missing data section; skipping")
+                return "OK", 200
+
+            contact_id = data_section.get("id")
+            if not contact_id:
+                print(f"{log_prefix} [ContactsUpsert] Missing contact id; skipping")
+                return "OK", 200
+
+            if isinstance(contact_id, str) and contact_id.endswith("@whatsapp.net"):
+                contact_id = contact_id[: -len("@whatsapp.net")]
+
+            digits_only = "".join(char for char in str(contact_id) if char.isdigit())
+            normalized_phone = _normalize_iraqi_number(digits_only)
+            print(f"{log_prefix} [ContactsUpsert] Raw id: {contact_id}")
+            print(f"{log_prefix} [ContactsUpsert] Normalized phone: {normalized_phone}")
+            if not normalized_phone:
+                print(f"{log_prefix} [ContactsUpsert] Failed to normalize phone; skipping")
+                return "OK", 200
+
+            print(f"{log_prefix} [ContactsUpsert] Contact detected: {normalized_phone}")
+            contact_name = data_section.get("name") or data_section.get("pushName") or "Unknown"
+
+            try:
+                existing = (
+                    supabase.table("clients")
+                    .select("id")
+                    .eq("phone", normalized_phone)
+                    .limit(1)
+                    .execute()
+                )
+            except Exception as exc:
+                print(f"{log_prefix} [ContactsUpsert] Failed to query clients table: {exc}")
+                return "OK", 200
+
+            try:
+                if existing.data:
+                    client_id = existing.data[0].get("id")
+                    supabase.table("clients").update({"name": contact_name}).eq(
+                        "id", client_id
+                    ).execute()
+                    print(f"{log_prefix} [ContactsUpsert] Client updated: {normalized_phone}")
+                else:
+                    supabase.table("clients").insert(
+                        {"phone": normalized_phone, "name": contact_name}
+                    ).execute()
+                    print(f"{log_prefix} [ContactsUpsert] Client inserted: {normalized_phone}")
+            except Exception as exc:
+                print(f"{log_prefix} [ContactsUpsert] Failed to upsert client: {exc}")
+
             return "OK", 200
 
-        contact_id = data_section.get("id")
-        if not contact_id:
-            print(f"{log_prefix} [ContactsUpsert] Missing contact id; skipping")
-            return "OK", 200
+        if normalized_event in SUPPORTED_MESSAGE_EVENTS:
+            message_tag = "[MessageUpsert]" if normalized_event == "messages.upsert" else "[MessageEvent]"
+            print(f"{log_prefix} {message_tag} Full payload received")
+            print(f"{log_prefix} {message_tag} Payload: {payload}")
+            if not isinstance(data_section, dict):
+                print(f"{log_prefix} {message_tag} Missing data section; skipping")
+                return "OK", 200
 
-        if isinstance(contact_id, str) and contact_id.endswith("@whatsapp.net"):
-            contact_id = contact_id[: -len("@whatsapp.net")]
+            message = _coerce_message_dict(data_section)
+            if not isinstance(message, dict):
+                print(f"{log_prefix} {message_tag} messages block missing or invalid; skipping")
+                return "OK", 200
+            print(f"{log_prefix} {message_tag} messages keys={list(message.keys())}")
 
-        digits_only = "".join(char for char in str(contact_id) if char.isdigit())
-        normalized_phone = _normalize_iraqi_number(digits_only)
-        print(f"{log_prefix} [ContactsUpsert] Raw id: {contact_id}")
-        print(f"{log_prefix} [ContactsUpsert] Normalized phone: {normalized_phone}")
-        if not normalized_phone:
-            print(f"{log_prefix} [ContactsUpsert] Failed to normalize phone; skipping")
-            return "OK", 200
+            if _extract_from_me_flag(message):
+                print(f"{log_prefix} {message_tag} Outbound message detected; skipping client insert")
+                return "OK", 200
 
-        print(f"{log_prefix} [ContactsUpsert] Contact detected: {normalized_phone}")
-        contact_name = data_section.get("name") or data_section.get("pushName") or "Unknown"
+            push_name, _ = _resolve_sender_name(payload, data_section, message)
+            push_name = push_name or "Unknown"
+            raw_push = message.get("pushName")
+            print(f"{log_prefix} {message_tag} pushName raw: {raw_push} chosen: {push_name}")
 
-        try:
-            existing = (
-                supabase.table("clients")
-                .select("id")
-                .eq("phone", normalized_phone)
-                .limit(1)
-                .execute()
-            )
-        except Exception as exc:
-            print(f"{log_prefix} [ContactsUpsert] Failed to query clients table: {exc}")
-            return "OK", 200
+            normalized_phone = None
+            source_used = None
+            digits = ""
 
-        try:
-            if existing.data:
-                client_id = existing.data[0].get("id")
-                supabase.table("clients").update({"name": contact_name}).eq(
-                    "id", client_id
-                ).execute()
-                print(f"{log_prefix} [ContactsUpsert] Client updated: {normalized_phone}")
-            else:
-                supabase.table("clients").insert(
-                    {"phone": normalized_phone, "name": contact_name}
-                ).execute()
-                print(f"{log_prefix} [ContactsUpsert] Client inserted: {normalized_phone}")
-        except Exception as exc:
-            print(f"{log_prefix} [ContactsUpsert] Failed to upsert client: {exc}")
-
-        return "OK", 200
-
-    if normalized_event in SUPPORTED_MESSAGE_EVENTS:
-        message_tag = "[MessageUpsert]" if normalized_event == "messages.upsert" else "[MessageEvent]"
-        print(f"{log_prefix} {message_tag} Full payload received")
-        print(f"{log_prefix} {message_tag} Payload: {payload}")
-        if not isinstance(data_section, dict):
-            print(f"{log_prefix} {message_tag} Missing data section; skipping")
-            return "OK", 200
-
-        message = _coerce_message_dict(data_section)
-        if not isinstance(message, dict):
-            print(f"{log_prefix} {message_tag} messages block missing or invalid; skipping")
-            return "OK", 200
-        print(f"{log_prefix} {message_tag} messages keys={list(message.keys())}")
-
-        if _extract_from_me_flag(message):
-            print(f"{log_prefix} {message_tag} Outbound message detected; skipping client insert")
-            return "OK", 200
-
-        push_name, _ = _resolve_sender_name(payload, data_section, message)
-        push_name = push_name or "Unknown"
-        raw_push = message.get("pushName")
-        print(f"{log_prefix} {message_tag} pushName raw: {raw_push} chosen: {push_name}")
-
-        normalized_phone = None
-        source_used = None
-        digits = ""
-
-        cleaned_candidate = message.get("cleanedSenderPn")
-        print(f"{log_prefix} {message_tag} Testing cleanedSenderPn: {cleaned_candidate}")
-        normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
-            cleaned_candidate, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
-        )
-        if normalized_phone:
-            source_used = "cleanedSenderPn"
-            print(f"{log_prefix} {message_tag} Phone accepted from cleanedSenderPn: {normalized_phone}")
-
-        if normalized_phone is None:
-            sender_candidate = message.get("senderPn")
-            print(f"{log_prefix} {message_tag} Testing senderPn: {sender_candidate}")
+            cleaned_candidate = message.get("cleanedSenderPn")
+            print(f"{log_prefix} {message_tag} Testing cleanedSenderPn: {cleaned_candidate}")
             normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
-                sender_candidate, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
+                cleaned_candidate, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
             )
             if normalized_phone:
-                source_used = "senderPn"
-                print(f"{log_prefix} {message_tag} Phone accepted from senderPn: {normalized_phone}")
-            elif sender_candidate is not None:
-                print(f"{log_prefix} {message_tag} senderPn rejected ({reason}), digits={digits}")
+                source_used = "cleanedSenderPn"
+                print(f"{log_prefix} {message_tag} Phone accepted from cleanedSenderPn: {normalized_phone}")
 
-        if normalized_phone is None:
-            remote_jid = message.get("remoteJid")
-            print(f"{log_prefix} {message_tag} Testing remoteJid: {remote_jid}")
-            if isinstance(remote_jid, str) and "@lid" in remote_jid.lower():
-                print(f"{log_prefix} {message_tag} remoteJid contains @lid; ignoring")
-            else:
+            if normalized_phone is None:
+                sender_candidate = message.get("senderPn")
+                print(f"{log_prefix} {message_tag} Testing senderPn: {sender_candidate}")
                 normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
-                    remote_jid, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
+                    sender_candidate, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
                 )
                 if normalized_phone:
-                    source_used = "remoteJid"
-                    print(f"{log_prefix} {message_tag} Phone accepted from remoteJid: {normalized_phone}")
-                elif remote_jid is not None:
-                    print(f"{log_prefix} {message_tag} remoteJid rejected ({reason}), digits={digits}")
+                    source_used = "senderPn"
+                    print(f"{log_prefix} {message_tag} Phone accepted from senderPn: {normalized_phone}")
+                elif sender_candidate is not None:
+                    print(f"{log_prefix} {message_tag} senderPn rejected ({reason}), digits={digits}")
 
-        candidates = extract_sender_candidates(payload)
-        best_candidate = _select_best_candidate(candidates)
-        if DEBUG_WEBHOOK:
-            print(f"{log_prefix} {message_tag} [DeepScan] Candidates found: {len(candidates)}")
-            for cand in candidates:
-                print(
-                    f"{log_prefix} {message_tag} [DeepScan] path={cand['path']} "
-                    f"value={cand['value']} digits={cand['digits']} score={cand['score']}"
-                )
-            if best_candidate:
-                print(
-                    f"{log_prefix} {message_tag} [DeepScan] Best candidate path={best_candidate['path']} "
-                    f"value={best_candidate['value']}"
-                )
+            if normalized_phone is None:
+                remote_jid = message.get("remoteJid")
+                print(f"{log_prefix} {message_tag} Testing remoteJid: {remote_jid}")
+                if isinstance(remote_jid, str) and "@lid" in remote_jid.lower():
+                    print(f"{log_prefix} {message_tag} remoteJid contains @lid; ignoring")
+                else:
+                    normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
+                        remote_jid, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
+                    )
+                    if normalized_phone:
+                        source_used = "remoteJid"
+                        print(f"{log_prefix} {message_tag} Phone accepted from remoteJid: {normalized_phone}")
+                    elif remote_jid is not None:
+                        print(f"{log_prefix} {message_tag} remoteJid rejected ({reason}), digits={digits}")
 
-        if normalized_phone is None and best_candidate:
-            deep_value = best_candidate["value"]
-            normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
-                deep_value, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
-            )
-            if normalized_phone:
-                source_used = f"deep_scan:{best_candidate['path']}"
-                print(
-                    f"{log_prefix} {message_tag} Phone accepted from deep scan ({best_candidate['path']}): "
-                    f"{normalized_phone}"
-                )
-            elif DEBUG_WEBHOOK:
-                print(
-                    f"{log_prefix} {message_tag} [DeepScan] Candidate rejected ({reason}); digits={digits}"
-                )
-
-        if normalized_phone is None:
-            print(f"{log_prefix} {message_tag} No reliable phone found; full payload logged for debugging")
-            print(f"{log_prefix} {message_tag} Payload: {payload}")
-            return {"status": "ignored", "reason": "no_phone"}, 200
-
-        try:
-            existing = (
-                supabase.table("clients")
-                .select("id")
-                .eq("phone", normalized_phone)
-                .limit(1)
-                .execute()
-            )
+            candidates = extract_sender_candidates(payload)
+            best_candidate = _select_best_candidate(candidates)
             if DEBUG_WEBHOOK:
-                print(
-                    f"{log_prefix} {message_tag} Supabase select resp data={existing.data} "
-                    f"error={getattr(existing, 'error', None)}"
-                )
-        except Exception as exc:
-            print(f"{log_prefix} {message_tag} Failed to query clients table: {exc}")
-            return "OK", 200
+                print(f"{log_prefix} {message_tag} [DeepScan] Candidates found: {len(candidates)}")
+                for cand in candidates:
+                    print(
+                        f"{log_prefix} {message_tag} [DeepScan] path={cand['path']} "
+                        f"value={cand['value']} digits={cand['digits']} score={cand['score']}"
+                    )
+                if best_candidate:
+                    print(
+                        f"{log_prefix} {message_tag} [DeepScan] Best candidate path={best_candidate['path']} "
+                        f"value={best_candidate['value']}"
+                    )
 
-        if existing.data:
-            print(f"{log_prefix} {message_tag} Client resolved: {normalized_phone}")
-        else:
+            if normalized_phone is None and best_candidate:
+                deep_value = best_candidate["value"]
+                normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
+                    deep_value, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
+                )
+                if normalized_phone:
+                    source_used = f"deep_scan:{best_candidate['path']}"
+                    print(
+                        f"{log_prefix} {message_tag} Phone accepted from deep scan ({best_candidate['path']}): "
+                        f"{normalized_phone}"
+                    )
+                elif DEBUG_WEBHOOK:
+                    print(
+                        f"{log_prefix} {message_tag} [DeepScan] Candidate rejected ({reason}); digits={digits}"
+                    )
+
+            if normalized_phone is None:
+                print(f"{log_prefix} {message_tag} No reliable phone found; full payload logged for debugging")
+                print(f"{log_prefix} {message_tag} Payload: {payload}")
+                return {"status": "ignored", "reason": "no_phone"}, 200
+
             try:
-                insert_resp = (
+                existing = (
                     supabase.table("clients")
-                    .insert({"phone": normalized_phone, "name": push_name})
+                    .select("id")
+                    .eq("phone", normalized_phone)
+                    .limit(1)
                     .execute()
                 )
                 if DEBUG_WEBHOOK:
                     print(
-                        f"{log_prefix} {message_tag} Supabase insert resp data={insert_resp.data} "
-                        f"error={getattr(insert_resp, 'error', None)}"
+                        f"{log_prefix} {message_tag} Supabase select resp data={existing.data} "
+                        f"error={getattr(existing, 'error', None)}"
                     )
-                print(f"{log_prefix} {message_tag} Client created on first message: {normalized_phone}")
             except Exception as exc:
-                print(f"{log_prefix} {message_tag} Failed to insert client: {exc}")
+                print(f"{log_prefix} {message_tag} Failed to query clients table: {exc}")
                 return "OK", 200
 
-        print(f"{log_prefix} {message_tag} Client resolved for message: {normalized_phone}")
-        return "OK", 200
+            if existing.data:
+                print(f"{log_prefix} {message_tag} Client resolved: {normalized_phone}")
+            else:
+                try:
+                    insert_resp = (
+                        supabase.table("clients")
+                        .insert({"phone": normalized_phone, "name": push_name})
+                        .execute()
+                    )
+                    if DEBUG_WEBHOOK:
+                        print(
+                            f"{log_prefix} {message_tag} Supabase insert resp data={insert_resp.data} "
+                            f"error={getattr(insert_resp, 'error', None)}"
+                        )
+                    print(f"{log_prefix} {message_tag} Client created on first message: {normalized_phone}")
+                except Exception as exc:
+                    print(f"{log_prefix} {message_tag} Failed to insert client: {exc}")
+                    return "OK", 200
 
-    return "OK", 200
+            print(f"{log_prefix} {message_tag} Client resolved for message: {normalized_phone}")
+            return "OK", 200
+
+        return "OK", 200
+    finally:
+        IN_WEBHOOK_CONTEXT = False
 
 
 if DEBUG_WEBHOOK:
