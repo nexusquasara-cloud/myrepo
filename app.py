@@ -333,63 +333,66 @@ def health_check():
 @app.route("/wasender/webhook", methods=["POST"])
 def wasender_webhook():
     payload = request.get_json(silent=True) or {}
+    event_name = payload.get("event")
+    data_section = payload.get("data") or {}
 
-    data_section = payload.get("data")
-    if not isinstance(data_section, dict):
+    if event_name == "contacts.upsert":
+        print(f"[ContactsUpsert] Full payload: {payload}")
+        if not isinstance(data_section, dict):
+            print("[ContactsUpsert] Missing data section; skipping")
+            return "OK", 200
+
+        contact_id = data_section.get("id")
+        if not contact_id:
+            print("[ContactsUpsert] Missing contact id; skipping")
+            return "OK", 200
+
+        if isinstance(contact_id, str) and contact_id.endswith("@whatsapp.net"):
+            contact_id = contact_id[: -len("@whatsapp.net")]
+
+        digits_only = "".join(char for char in str(contact_id) if char.isdigit())
+        normalized_phone = _normalize_iraqi_number(digits_only)
+        print(f"[ContactsUpsert] Raw id: {contact_id}")
+        print(f"[ContactsUpsert] Normalized phone: {normalized_phone}")
+        if not normalized_phone:
+            print("[ContactsUpsert] Failed to normalize phone; skipping")
+            return "OK", 200
+
+        print(f"[ContactsUpsert] Contact detected: {normalized_phone}")
+        contact_name = data_section.get("name") or data_section.get("pushName") or "Unknown"
+
+        try:
+            existing = (
+                supabase.table("clients")
+                .select("id")
+                .eq("phone", normalized_phone)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:
+            print(f"[ContactsUpsert] Failed to query clients table: {exc}")
+            return "OK", 200
+
+        try:
+            if existing.data:
+                client_id = existing.data[0].get("id")
+                supabase.table("clients").update(
+                    {"name": contact_name}
+                ).eq("id", client_id).execute()
+                print(f"[ContactsUpsert] Client updated: {normalized_phone}")
+            else:
+                supabase.table("clients").insert(
+                    {"phone": normalized_phone, "name": contact_name}
+                ).execute()
+                print(f"[ContactsUpsert] Client inserted: {normalized_phone}")
+        except Exception as exc:
+            print(f"[ContactsUpsert] Failed to upsert client: {exc}")
+
         return "OK", 200
 
-    messages = data_section.get("messages", {})
-    if isinstance(messages, list) and messages:
-        messages = messages[0] if isinstance(messages[0], dict) else {}
-    if not isinstance(messages, dict):
+    if event_name in {"messages.received", "messages.upsert"}:
+        print("[MessageEvent] Message received – client resolution skipped")
         return "OK", 200
-
-    sender_phone_raw = None
-    sender_from_senderpn = False
-    if isinstance(messages, dict):
-        cleaned = messages.get("cleanedSenderPn")
-        if cleaned:
-            sender_phone_raw = cleaned
-        else:
-            sender_phone_raw = messages.get("senderPn")
-            sender_from_senderpn = sender_phone_raw is not None
-
-    if sender_phone_raw is None:
-        print("[WasenderWebhook] No sender phone in this event")
-        return "OK", 200
-
-    if sender_from_senderpn and isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@s.whatsapp.net"):
-        sender_phone_raw = sender_phone_raw[: -len("@s.whatsapp.net")]
-
-    digits_only = "".join(char for char in str(sender_phone_raw) if char.isdigit())
-    normalized_phone = _normalize_iraqi_number(digits_only)
-    if not normalized_phone:
-        return "OK", 200
-
-    sender_name = data_section.get("pushName") or "Unknown"
-
-    try:
-        existing = (
-            supabase.table("clients")
-            .select("id")
-            .eq("phone", normalized_phone)
-            .limit(1)
-            .execute()
-        )
-    except Exception as exc:
-        print(f"[WasenderWebhook] Failed to query clients table: {exc}")
-        return "OK", 200
-
-    if existing.data:
-        return "OK", 200
-
-    try:
-        supabase.table("clients").insert(
-            {"phone": normalized_phone, "name": sender_name}
-        ).execute()
-        print(f"[WasenderWebhook] Client auto-added: {normalized_phone}")
-    except Exception as exc:
-        print(f"[WasenderWebhook] Failed to insert new client: {exc}")
 
     return "OK", 200
 
