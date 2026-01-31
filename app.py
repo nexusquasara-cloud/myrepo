@@ -229,7 +229,7 @@ def _generate_request_id(headers):
     )
 
 
-def _normalize_incoming_phone(value):
+def normalize_iraqi_phone_from_jid(value):
     """
     Normalize any incoming WhatsApp identifier to +9647XXXXXXXXX (13 digits).
     Strips WhatsApp-specific suffixes like @s.whatsapp.net or @lid, keeps digits only,
@@ -249,7 +249,8 @@ def _normalize_incoming_phone(value):
     if digits.startswith("00"):
         digits = digits[2:]
     if digits.startswith("9647") and len(digits) == 13:
-        return f"+{digits}", digits, None
+        normalized = digits if digits.startswith("+") else f"+{digits}"
+        return normalized, digits, None
     return None, digits, "not iraqi mobile"
 
 
@@ -466,7 +467,7 @@ def wasender_webhook():
 
         cleaned_candidate = message.get("cleanedSenderPn")
         print(f"{log_prefix} [MessageUpsert] Testing cleanedSenderPn: {cleaned_candidate}")
-        normalized_phone, digits, reason = _normalize_incoming_phone(cleaned_candidate)
+        normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(cleaned_candidate)
         if normalized_phone:
             source_used = "cleanedSenderPn"
             print(f"{log_prefix} [MessageUpsert] Phone accepted from cleanedSenderPn: {normalized_phone}")
@@ -474,7 +475,7 @@ def wasender_webhook():
         if normalized_phone is None:
             sender_candidate = message.get("senderPn")
             print(f"{log_prefix} [MessageUpsert] Testing senderPn: {sender_candidate}")
-            normalized_phone, digits, reason = _normalize_incoming_phone(sender_candidate)
+            normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(sender_candidate)
             if normalized_phone:
                 source_used = "senderPn"
                 print(f"{log_prefix} [MessageUpsert] Phone accepted from senderPn: {normalized_phone}")
@@ -487,7 +488,7 @@ def wasender_webhook():
             if isinstance(remote_jid, str) and "@lid" in remote_jid.lower():
                 print(f"{log_prefix} [MessageUpsert] remoteJid contains @lid; ignoring")
             else:
-                normalized_phone, digits, reason = _normalize_incoming_phone(remote_jid)
+                normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(remote_jid)
                 if normalized_phone:
                     source_used = "remoteJid"
                     print(f"{log_prefix} [MessageUpsert] Phone accepted from remoteJid: {normalized_phone}")
