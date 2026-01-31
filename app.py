@@ -445,23 +445,11 @@ def wasender_webhook():
             print(f"{log_prefix} [MessageUpsert] Missing data section; skipping")
             return "OK", 200
 
-        msgs = data_section.get("messages")
-        message = {}
-        if isinstance(msgs, dict):
-            message = msgs
-            print(f"{log_prefix} [MessageUpsert] messages type=dict keys={list(message.keys())}")
-        elif isinstance(msgs, list) and msgs:
-            candidate = msgs[0]
-            if isinstance(candidate, dict):
-                message = candidate
-            print(f"{log_prefix} [MessageUpsert] messages type=list keys={list(message.keys())}")
-        else:
+        message = data_section.get("messages")
+        if not isinstance(message, dict):
             print(f"{log_prefix} [MessageUpsert] messages block missing or invalid; skipping")
             return "OK", 200
-
-        if not message:
-            print(f"{log_prefix} [MessageUpsert] No message payload found; skipping")
-            return "OK", 200
+        print(f"{log_prefix} [MessageUpsert] messages keys={list(message.keys())}")
 
         from_me = message.get("key", {}).get("fromMe")
         if from_me is None:
@@ -473,32 +461,38 @@ def wasender_webhook():
         push_name = message.get("pushName") or "Unknown"
         print(f"{log_prefix} [MessageUpsert] pushName raw: {message.get('pushName')} chosen: {push_name}")
 
-        # Build ordered list of potential phone sources (strict priority).
-        candidate_order = [
-            ("data.messages[0].cleanedSenderPn", message.get("cleanedSenderPn")),
-            ("data.messages[0].senderPn", message.get("senderPn")),
-            (
-                "data.messages[0].remoteJid",
-                message.get("remoteJid"),
-            ),
-        ]
-
         normalized_phone = None
         source_used = None
-        for path, value in candidate_order:
-            raw_value = value
-            normalized_phone, digits, reason = _normalize_incoming_phone(value)
-            status = (
-                f"accepted -> {normalized_phone}"
-                if normalized_phone
-                else f"rejected ({reason})"
-            )
-            print(
-                f"{log_prefix} [MessageUpsert] Field {path} raw={raw_value} digits={digits} status={status}"
-            )
+
+        cleaned_candidate = message.get("cleanedSenderPn")
+        print(f"{log_prefix} [MessageUpsert] Testing cleanedSenderPn: {cleaned_candidate}")
+        normalized_phone, digits, reason = _normalize_incoming_phone(cleaned_candidate)
+        if normalized_phone:
+            source_used = "cleanedSenderPn"
+            print(f"{log_prefix} [MessageUpsert] Phone accepted from cleanedSenderPn: {normalized_phone}")
+
+        if normalized_phone is None:
+            sender_candidate = message.get("senderPn")
+            print(f"{log_prefix} [MessageUpsert] Testing senderPn: {sender_candidate}")
+            normalized_phone, digits, reason = _normalize_incoming_phone(sender_candidate)
             if normalized_phone:
-                source_used = path
-                break
+                source_used = "senderPn"
+                print(f"{log_prefix} [MessageUpsert] Phone accepted from senderPn: {normalized_phone}")
+            elif sender_candidate is not None:
+                print(f"{log_prefix} [MessageUpsert] senderPn rejected ({reason}), digits={digits}")
+
+        if normalized_phone is None:
+            remote_jid = message.get("remoteJid")
+            print(f"{log_prefix} [MessageUpsert] Testing remoteJid: {remote_jid}")
+            if isinstance(remote_jid, str) and "@lid" in remote_jid.lower():
+                print(f"{log_prefix} [MessageUpsert] remoteJid contains @lid; ignoring")
+            else:
+                normalized_phone, digits, reason = _normalize_incoming_phone(remote_jid)
+                if normalized_phone:
+                    source_used = "remoteJid"
+                    print(f"{log_prefix} [MessageUpsert] Phone accepted from remoteJid: {normalized_phone}")
+                elif remote_jid is not None:
+                    print(f"{log_prefix} [MessageUpsert] remoteJid rejected ({reason}), digits={digits}")
 
         if normalized_phone is None:
             print(f"{log_prefix} [MessageUpsert] No reliable phone found; full payload logged for debugging")
