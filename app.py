@@ -336,10 +336,10 @@ def wasender_webhook():
     print(f"[WasenderWebhook] Received payload: {payload}")
 
     event_name = payload.get("event")
-    allowed_events = {"messages.personal.received", "messages-personal.received"}
-    if event_name not in allowed_events:
+    if event_name != "messages.upsert":
         print(f"[WasenderWebhook] Ignoring event type: {event_name}")
         return "OK", 200
+    print("[WasenderWebhook] Processing messages.upsert")
 
     data_section = payload.get("data")
     if not isinstance(data_section, dict):
@@ -357,7 +357,7 @@ def wasender_webhook():
     )
     if isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@c.us"):
         sender_phone_raw = sender_phone_raw[:-4]
-    print(f"[WasenderWebhook] Extracted phone: {sender_phone_raw}")
+    print(f"[WasenderWebhook] Phone extracted: {sender_phone_raw}")
 
     normalized_phone = _normalize_iraqi_number(sender_phone_raw)
     if not normalized_phone:
