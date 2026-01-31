@@ -1,7 +1,9 @@
+import json
 import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import uuid
 
 import requests
@@ -17,11 +19,138 @@ supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 WASENDER_BASE_URL = os.environ.get("WASENDER_BASE_URL", "https://www.wasenderapi.com")
 WASENDER_API_KEY = os.environ.get("WASENDER_API_KEY")
+DEBUG_WEBHOOK = os.environ.get("DEBUG_WEBHOOK") == "1"
+BASE_DIR = Path(__file__).resolve().parent
+WEBHOOK_DUMP_DIR = BASE_DIR / "webhook_dumps"
 
 OWNER_WHATSAPP_NUMBER = "9647722602749"
 NOTIFICATION_INTERVAL_SECONDS = 60  # TEST MODE: notification check every 1 minute
 NOTIFICATION_LOOKAHEAD_DAYS = 7
 STATUS_LABELS = {"overdue": "Overdue", "expiring": "Expiring Soon"}
+SUPPORTED_MESSAGE_EVENTS = {
+    "messages.upsert",
+    "messages.received",
+    "messages.personal.received",
+}
+
+
+def _ensure_webhook_dump_dir():
+    try:
+        WEBHOOK_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+        return True
+    except Exception as exc:
+        print(f"[WebhookDebug] Failed to prepare dump directory: {exc}")
+        return False
+
+
+def _persist_webhook_payload(request_id, event_name, payload):
+    if not DEBUG_WEBHOOK:
+        return
+    if not _ensure_webhook_dump_dir():
+        return
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    safe_event = (event_name or "unknown").replace("/", "-").replace("\\", "-")
+    filename = f"{timestamp}_{request_id}_{safe_event}.json"
+    file_path = WEBHOOK_DUMP_DIR / filename
+    summary_path = WEBHOOK_DUMP_DIR / "last.json"
+    try:
+        with file_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"[WebhookDebug] Failed to write payload dump {file_path}: {exc}")
+    summary_payload = {
+        "request_id": request_id,
+        "event": event_name,
+        "timestamp": timestamp,
+        "file": filename,
+    }
+    try:
+        with summary_path.open("w", encoding="utf-8") as handle:
+            json.dump(summary_payload, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"[WebhookDebug] Failed to write summary dump {summary_path}: {exc}")
+
+
+def _evaluate_candidate_value(value, path):
+    text = str(value).strip()
+    if not text:
+        return None
+    lower = text.lower()
+    if "@lid" in lower:
+        return None
+    has_domain = "@s.whatsapp.net" in lower or "@c.us" in lower
+    digits = "".join(char for char in text if char.isdigit())
+    starts_plus_digits = text.startswith("+") and digits
+    starts_double_zero = text.startswith("00") and digits
+    has_length_window = 10 <= len(digits) <= 15
+    if not (has_domain or starts_plus_digits or starts_double_zero or has_length_window):
+        return None
+    iraq_hint = False
+    iraq_prefixes = ("+964", "964", "0")
+    for prefix in iraq_prefixes:
+        if text.startswith(prefix):
+            iraq_hint = True
+            break
+    if digits.startswith("964"):
+        iraq_hint = True
+    score = (
+        1 if has_domain else 0,
+        1 if has_length_window else 0,
+        1 if iraq_hint else 0,
+        len(digits),
+    )
+    return {
+        "path": path,
+        "value": text,
+        "digits": digits,
+        "score": score,
+        "has_domain": has_domain,
+    }
+
+
+def extract_sender_candidates(payload):
+    candidates = []
+
+    def _walk(node, path):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                _walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                _walk(value, f"{path}[{index}]")
+        elif isinstance(node, (str, int, float)):
+            candidate = _evaluate_candidate_value(node, path)
+            if candidate:
+                candidates.append(candidate)
+
+    _walk(payload, "$")
+    return candidates
+
+
+def _select_best_candidate(candidates):
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (
+            item["score"][0],
+            item["score"][1],
+            item["score"][2],
+            item["score"][3],
+        ),
+    )
+
+
+def _normalize_event_key(event_name):
+    if not event_name:
+        return ""
+    return (
+        str(event_name)
+        .strip()
+        .lower()
+        .replace("_", ".")
+        .replace("-", ".")
+    )
 
 
 def fetch_rentals_from_supabase():
@@ -221,15 +350,40 @@ def _extract_sender_details(payload):
     return phone, name
 
 
-def _generate_request_id(headers):
-    return (
-        headers.get("X-Request-Id")
-        or headers.get("X-Amzn-Trace-Id")
-        or uuid.uuid4().hex[:8]
-    )
+def _coerce_message_dict(data_section):
+    if isinstance(data_section, dict):
+        options = [data_section.get("messages"), data_section.get("message")]
+        for option in options:
+            if isinstance(option, dict):
+                return option
+            if isinstance(option, list):
+                for item in option:
+                    if isinstance(item, dict):
+                        return item
+    if isinstance(data_section, list):
+        for item in data_section:
+            if isinstance(item, dict):
+                return item
+    return None
 
 
-def normalize_iraqi_phone_from_jid(value):
+def _extract_from_me_flag(message):
+    if not isinstance(message, dict):
+        return False
+    key_block = message.get("key")
+    if isinstance(key_block, dict):
+        flag = key_block.get("fromMe")
+        if flag is not None:
+            return bool(flag)
+    flag = message.get("fromMe")
+    return bool(flag) if flag is not None else False
+
+
+def _generate_request_id():
+    return uuid.uuid4().hex[:8]
+
+
+def normalize_iraqi_phone_from_jid(value, *, debug=False, log_prefix=""):
     """
     Normalize any incoming WhatsApp identifier to +9647XXXXXXXXX (13 digits).
     Strips WhatsApp-specific suffixes like @s.whatsapp.net or @lid, keeps digits only,
@@ -237,21 +391,55 @@ def normalize_iraqi_phone_from_jid(value):
     and rejects any non-Iraqi mobile numbers.
     """
     if value is None:
+        if debug:
+            print(f"{log_prefix} [PhoneNormalize] Rejected value=None (empty value)")
         return None, "", "empty value"
     text = str(value).strip()
+    lower_text = text.lower()
+    if "@lid" in lower_text:
+        if debug:
+            print(f"{log_prefix} [PhoneNormalize] Rejected {text} due to @lid")
+        return None, "", "lid_rejected"
     if "@" in text:
         text = text.split("@", 1)[0]
     digits = "".join(char for char in text if char.isdigit())
     if not digits:
+        if debug:
+            print(f"{log_prefix} [PhoneNormalize] Rejected {value} (no digits)")
         return None, "", "no digits found"
-    if digits.startswith("07") and len(digits) == 11:
-        digits = "964" + digits[1:]
+
     if digits.startswith("00"):
+        if debug:
+            print(f"{log_prefix} [PhoneNormalize] Stripping 00 prefix from {digits}")
         digits = digits[2:]
-    if digits.startswith("9647") and len(digits) == 13:
-        normalized = digits if digits.startswith("+") else f"+{digits}"
+        if not digits:
+            if debug:
+                print(f"{log_prefix} [PhoneNormalize] Rejected {value} (no digits after country code)")
+            return None, "", "no digits found"
+    if digits.startswith("0") and 10 <= len(digits) <= 11:
+        if debug:
+            print(f"{log_prefix} [PhoneNormalize] Upgrading local number {digits} to Iraq code")
+        digits = "964" + digits[1:]
+    normalized = None
+    reason = None
+    if digits.startswith("964"):
+        normalized = f"+{digits}"
+    elif 10 <= len(digits) <= 15:
+        normalized = f"+{digits}"
+    else:
+        reason = "length_out_of_range"
+
+    if normalized and not normalized.startswith("+"):
+        normalized = f"+{normalized}"
+
+    if normalized:
+        if debug:
+            print(f"{log_prefix} [PhoneNormalize] Normalized {value} -> {normalized}")
         return normalized, digits, None
-    return None, digits, "not iraqi mobile"
+
+    if debug:
+        print(f"{log_prefix} [PhoneNormalize] Rejected {value} ({reason or 'not iraqi mobile'})")
+    return None, digits, reason or "not iraqi mobile"
 
 
 def _resolve_sender_name(payload, data_section, message):
@@ -378,14 +566,16 @@ def health_check():
 
 @app.route("/wasender/webhook", methods=["POST"])
 def wasender_webhook():
-    req_id = _generate_request_id(request.headers)
+    req_id = _generate_request_id()
     log_prefix = f"[WasenderWebhook][{req_id}]"
     payload = request.get_json(silent=True) or {}
     event_name = payload.get("event")
+    normalized_event = _normalize_event_key(event_name)
     data_section = payload.get("data") or {}
     print(f"{log_prefix} Event received: {event_name}")
+    _persist_webhook_payload(req_id, normalized_event or event_name, payload)
 
-    if event_name == "contacts.upsert":
+    if normalized_event == "contacts.upsert":
         print(f"{log_prefix} [ContactsUpsert] Full payload: {payload}")
         if not isinstance(data_section, dict):
             print(f"{log_prefix} [ContactsUpsert] Missing data section; skipping")
@@ -439,69 +629,104 @@ def wasender_webhook():
 
         return "OK", 200
 
-    if event_name == "messages.upsert":
-        print(f"{log_prefix} [MessageUpsert] Full payload received")
-        print(f"{log_prefix} [MessageUpsert] Payload: {payload}")
+    if normalized_event in SUPPORTED_MESSAGE_EVENTS:
+        message_tag = "[MessageUpsert]" if normalized_event == "messages.upsert" else "[MessageEvent]"
+        print(f"{log_prefix} {message_tag} Full payload received")
+        print(f"{log_prefix} {message_tag} Payload: {payload}")
         if not isinstance(data_section, dict):
-            print(f"{log_prefix} [MessageUpsert] Missing data section; skipping")
+            print(f"{log_prefix} {message_tag} Missing data section; skipping")
             return "OK", 200
 
-        message = data_section.get("messages")
+        message = _coerce_message_dict(data_section)
         if not isinstance(message, dict):
-            print(f"{log_prefix} [MessageUpsert] messages block missing or invalid; skipping")
+            print(f"{log_prefix} {message_tag} messages block missing or invalid; skipping")
             return "OK", 200
-        print(f"{log_prefix} [MessageUpsert] messages keys={list(message.keys())}")
+        print(f"{log_prefix} {message_tag} messages keys={list(message.keys())}")
 
-        from_me = message.get("key", {}).get("fromMe")
-        if from_me is None:
-            from_me = message.get("fromMe")
-        if from_me:
-            print(f"{log_prefix} [MessageUpsert] Outbound message detected; skipping client insert")
+        if _extract_from_me_flag(message):
+            print(f"{log_prefix} {message_tag} Outbound message detected; skipping client insert")
             return "OK", 200
 
-        push_name = message.get("pushName") or "Unknown"
-        print(f"{log_prefix} [MessageUpsert] pushName raw: {message.get('pushName')} chosen: {push_name}")
+        push_name, _ = _resolve_sender_name(payload, data_section, message)
+        push_name = push_name or "Unknown"
+        raw_push = message.get("pushName")
+        print(f"{log_prefix} {message_tag} pushName raw: {raw_push} chosen: {push_name}")
 
         normalized_phone = None
         source_used = None
+        digits = ""
 
         cleaned_candidate = message.get("cleanedSenderPn")
-        print(f"{log_prefix} [MessageUpsert] Testing cleanedSenderPn: {cleaned_candidate}")
-        normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(cleaned_candidate)
+        print(f"{log_prefix} {message_tag} Testing cleanedSenderPn: {cleaned_candidate}")
+        normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
+            cleaned_candidate, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
+        )
         if normalized_phone:
             source_used = "cleanedSenderPn"
-            print(f"{log_prefix} [MessageUpsert] Phone accepted from cleanedSenderPn: {normalized_phone}")
+            print(f"{log_prefix} {message_tag} Phone accepted from cleanedSenderPn: {normalized_phone}")
 
         if normalized_phone is None:
             sender_candidate = message.get("senderPn")
-            print(f"{log_prefix} [MessageUpsert] Testing senderPn: {sender_candidate}")
-            normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(sender_candidate)
+            print(f"{log_prefix} {message_tag} Testing senderPn: {sender_candidate}")
+            normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
+                sender_candidate, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
+            )
             if normalized_phone:
                 source_used = "senderPn"
-                print(f"{log_prefix} [MessageUpsert] Phone accepted from senderPn: {normalized_phone}")
+                print(f"{log_prefix} {message_tag} Phone accepted from senderPn: {normalized_phone}")
             elif sender_candidate is not None:
-                print(f"{log_prefix} [MessageUpsert] senderPn rejected ({reason}), digits={digits}")
+                print(f"{log_prefix} {message_tag} senderPn rejected ({reason}), digits={digits}")
 
         if normalized_phone is None:
             remote_jid = message.get("remoteJid")
-            print(f"{log_prefix} [MessageUpsert] Testing remoteJid: {remote_jid}")
+            print(f"{log_prefix} {message_tag} Testing remoteJid: {remote_jid}")
             if isinstance(remote_jid, str) and "@lid" in remote_jid.lower():
-                print(f"{log_prefix} [MessageUpsert] remoteJid contains @lid; ignoring")
+                print(f"{log_prefix} {message_tag} remoteJid contains @lid; ignoring")
             else:
-                normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(remote_jid)
+                normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
+                    remote_jid, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
+                )
                 if normalized_phone:
                     source_used = "remoteJid"
-                    print(f"{log_prefix} [MessageUpsert] Phone accepted from remoteJid: {normalized_phone}")
+                    print(f"{log_prefix} {message_tag} Phone accepted from remoteJid: {normalized_phone}")
                 elif remote_jid is not None:
-                    print(f"{log_prefix} [MessageUpsert] remoteJid rejected ({reason}), digits={digits}")
+                    print(f"{log_prefix} {message_tag} remoteJid rejected ({reason}), digits={digits}")
+
+        candidates = extract_sender_candidates(payload)
+        best_candidate = _select_best_candidate(candidates)
+        if DEBUG_WEBHOOK:
+            print(f"{log_prefix} {message_tag} [DeepScan] Candidates found: {len(candidates)}")
+            for cand in candidates:
+                print(
+                    f"{log_prefix} {message_tag} [DeepScan] path={cand['path']} "
+                    f"value={cand['value']} digits={cand['digits']} score={cand['score']}"
+                )
+            if best_candidate:
+                print(
+                    f"{log_prefix} {message_tag} [DeepScan] Best candidate path={best_candidate['path']} "
+                    f"value={best_candidate['value']}"
+                )
+
+        if normalized_phone is None and best_candidate:
+            deep_value = best_candidate["value"]
+            normalized_phone, digits, reason = normalize_iraqi_phone_from_jid(
+                deep_value, debug=DEBUG_WEBHOOK, log_prefix=log_prefix
+            )
+            if normalized_phone:
+                source_used = f"deep_scan:{best_candidate['path']}"
+                print(
+                    f"{log_prefix} {message_tag} Phone accepted from deep scan ({best_candidate['path']}): "
+                    f"{normalized_phone}"
+                )
+            elif DEBUG_WEBHOOK:
+                print(
+                    f"{log_prefix} {message_tag} [DeepScan] Candidate rejected ({reason}); digits={digits}"
+                )
 
         if normalized_phone is None:
-            print(f"{log_prefix} [MessageUpsert] No reliable phone found; full payload logged for debugging")
-            print(f"{log_prefix} [MessageUpsert] Payload: {payload}")
-            return (
-                {"status": "ignored", "reason": "no_valid_phone", "debug": {"event": event_name}},
-                200,
-            )
+            print(f"{log_prefix} {message_tag} No reliable phone found; full payload logged for debugging")
+            print(f"{log_prefix} {message_tag} Payload: {payload}")
+            return {"status": "ignored", "reason": "no_phone"}, 200
 
         try:
             existing = (
@@ -511,30 +736,53 @@ def wasender_webhook():
                 .limit(1)
                 .execute()
             )
+            if DEBUG_WEBHOOK:
+                print(
+                    f"{log_prefix} {message_tag} Supabase select resp data={existing.data} "
+                    f"error={getattr(existing, 'error', None)}"
+                )
         except Exception as exc:
-            print(f"{log_prefix} [MessageUpsert] Failed to query clients table: {exc}")
+            print(f"{log_prefix} {message_tag} Failed to query clients table: {exc}")
             return "OK", 200
 
         if existing.data:
-            print(f"{log_prefix} [MessageUpsert] Client resolved: {normalized_phone}")
+            print(f"{log_prefix} {message_tag} Client resolved: {normalized_phone}")
         else:
             try:
-                supabase.table("clients").insert(
-                    {
-                        "phone": normalized_phone,
-                        "name": push_name,
-                        "source": "whatsapp",
-                    }
-                ).execute()
-                print(f"{log_prefix} [MessageUpsert] Client created on first message: {normalized_phone}")
+                insert_resp = (
+                    supabase.table("clients")
+                    .insert({"phone": normalized_phone, "name": push_name})
+                    .execute()
+                )
+                if DEBUG_WEBHOOK:
+                    print(
+                        f"{log_prefix} {message_tag} Supabase insert resp data={insert_resp.data} "
+                        f"error={getattr(insert_resp, 'error', None)}"
+                    )
+                print(f"{log_prefix} {message_tag} Client created on first message: {normalized_phone}")
             except Exception as exc:
-                print(f"{log_prefix} [MessageUpsert] Failed to insert client: {exc}")
+                print(f"{log_prefix} {message_tag} Failed to insert client: {exc}")
                 return "OK", 200
 
-        print(f"{log_prefix} [MessageUpsert] Client resolved for message: {normalized_phone}")
+        print(f"{log_prefix} {message_tag} Client resolved for message: {normalized_phone}")
         return "OK", 200
 
     return "OK", 200
+
+
+if DEBUG_WEBHOOK:
+
+    @app.route("/debug/last-webhook", methods=["GET"])
+    def debug_last_webhook():
+        summary_path = WEBHOOK_DUMP_DIR / "last.json"
+        if not summary_path.exists():
+            return "Not Found", 404
+        try:
+            contents = summary_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            print(f"[WebhookDebug] Failed to read last webhook summary: {exc}")
+            return "Error", 500
+        return contents, 200, {"Content-Type": "application/json"}
 
 
 if __name__ == "__main__":
