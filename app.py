@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import requests
-from flask import Flask
+from flask import Flask, request
 from supabase import create_client
 
 app = Flask(__name__)
@@ -274,6 +274,13 @@ start_rental_notification_scheduler()
 @app.route("/", methods=["GET"])
 def health_check():
     return "RealesrateCRM Webhook is running", 200
+
+
+@app.route("/wasender/webhook", methods=["POST"])
+def wasender_webhook():
+    payload = request.get_json(silent=True) or {}
+    print(f"[WasenderWebhook] Received payload: {payload}")
+    return "OK", 200
 
 
 if __name__ == "__main__":
