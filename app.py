@@ -493,35 +493,41 @@ def wasender_webhook():
             print(f"{log_prefix} [MessageUpsert] Outbound message detected; skipping client insert")
             return "OK", 200
 
-        push_name, name_source = _resolve_sender_name(payload, data_section, message)
-        print(f"{log_prefix} [MessageUpsert] Name source {name_source}: {push_name}")
+        push_name = message.get("pushName") or "Unknown"
+        print(f"{log_prefix} [MessageUpsert] pushName raw: {message.get('pushName')} chosen: {push_name}")
 
-        candidates = _extract_phone_candidates(message, data_section)
+        candidate_order = [
+            ("data.messages[0].cleanedSenderPn", message.get("cleanedSenderPn")),
+            ("data.messages[0].senderPn", message.get("senderPn")),
+            (
+                "data.messages[0].key.remoteJid",
+                message.get("key", {}).get("remoteJid") if isinstance(message.get("key"), dict) else None,
+            ),
+        ]
+
         normalized_phone = None
         source_used = None
-        tried_paths = []
-        for path, value in candidates:
-            normalized, digits_only, reason = _normalize_incoming_phone(value)
-            status = (
-                f"accepted -> {normalized}"
-                if normalized
-                else f"rejected ({reason})"
-            )
+        for path, value in candidate_order:
+            raw_value = value
+            if isinstance(value, str) and "@" in value:
+                value = value.split("@", 1)[0]
+            digits = "".join(ch for ch in str(value) if ch.isdigit()) if value else ""
+            if not digits:
+                print(f"{log_prefix} [MessageUpsert] Field {path} rejected (no digits). Raw={raw_value}")
+                continue
+            if not digits.startswith("964"):
+                print(f"{log_prefix} [MessageUpsert] Field {path} rejected (not 964). Digits={digits}")
+                continue
+            normalized_phone = f"+{digits}"
+            source_used = path
             print(
-                f"{log_prefix} [MessageUpsert] Candidate {path}: value={value} digits={digits_only} status={status}"
+                f"{log_prefix} [MessageUpsert] Field {path} accepted. Raw={raw_value} Digits={digits} Normalized={normalized_phone}"
             )
-            tried_paths.append(path)
-            if normalized:
-                normalized_phone = normalized
-                source_used = path
-                break
+            break
 
         if normalized_phone is None:
-            print(f"{log_prefix} [MessageUpsert] No reliable phone found; message skipped")
-            print(
-                f"{log_prefix} [MessageUpsert] Candidate paths tried: {tried_paths}"
-            )
-            print(f"{log_prefix} [MessageUpsert] Full payload: {payload}")
+            print(f"{log_prefix} [MessageUpsert] No reliable phone found; full payload logged for debugging")
+            print(f"{log_prefix} [MessageUpsert] Payload: {payload}")
             return (
                 {"status": "ignored", "reason": "no_valid_phone", "debug": {"event": event_name}},
                 200,
@@ -544,7 +550,12 @@ def wasender_webhook():
         else:
             try:
                 supabase.table("clients").insert(
-                    {"phone": normalized_phone, "name": push_name}
+                    {
+                        "phone": normalized_phone,
+                        "name": push_name,
+                        "source": "whatsapp",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }
                 ).execute()
                 print(f"{log_prefix} [MessageUpsert] Client created on first message: {normalized_phone}")
             except Exception as exc:
