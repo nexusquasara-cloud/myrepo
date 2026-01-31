@@ -360,19 +360,26 @@ def wasender_webhook():
     if isinstance(key_section, dict):
         print(f"[WasenderWebhook][DEBUG] key keys: {list(key_section.keys())}")
 
-    attempts = []
-    attempts.append(("data.from", data_section.get("from")))
-    attempts.append(("data.chatId", data_section.get("chatId")))
-    key_remote = key_section.get("remoteJid") if isinstance(key_section, dict) else None
-    attempts.append(("data.key.remoteJid", key_remote))
-    messages_remote = None
     messages = data_section.get("messages")
-    if isinstance(messages, list) and messages:
+    print(f"[WasenderWebhook][DEBUG] messages type = {type(messages)}")
+    messages_remote = None
+    if isinstance(messages, dict):
+        messages_remote = (
+            messages.get("key", {}).get("remoteJid") if isinstance(messages.get("key"), dict) else None
+        )
+    elif isinstance(messages, list) and messages:
         first_msg = messages[0]
         if isinstance(first_msg, dict):
             msg_key = first_msg.get("key")
             if isinstance(msg_key, dict):
                 messages_remote = msg_key.get("remoteJid")
+    print(f"[WasenderWebhook][DEBUG] remoteJid extracted = {messages_remote}")
+
+    attempts = []
+    attempts.append(("data.from", data_section.get("from")))
+    attempts.append(("data.chatId", data_section.get("chatId")))
+    key_remote = key_section.get("remoteJid") if isinstance(key_section, dict) else None
+    attempts.append(("data.key.remoteJid", key_remote))
     attempts.append(("data.messages[0].key.remoteJid", messages_remote))
 
     sender_phone_raw = None
@@ -387,8 +394,11 @@ def wasender_webhook():
         print(f"[WasenderWebhook][ERROR] Full payload: {payload}")
         return "OK", 200
 
-    if isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@c.us"):
-        sender_phone_raw = sender_phone_raw[:-4]
+    if isinstance(sender_phone_raw, str):
+        for suffix in ("@lid", "@c.us", "@s.whatsapp.net"):
+            if sender_phone_raw.endswith(suffix):
+                sender_phone_raw = sender_phone_raw[: -len(suffix)]
+                break
     print(f"[WasenderWebhook][DEBUG] RAW sender_phone_raw = {sender_phone_raw}")
 
     digits = "".join(char for char in str(sender_phone_raw) if char.isdigit())
@@ -423,7 +433,7 @@ def wasender_webhook():
         supabase.table("clients").insert(
             {"phone": normalized_phone, "name": sender_name}
         ).execute()
-        print("[WasenderWebhook] New client inserted successfully")
+        print(f"[WasenderWebhook] Client auto-added: {normalized_phone}")
     except Exception as exc:
         print(f"[WasenderWebhook] Failed to insert new client: {exc}")
 
