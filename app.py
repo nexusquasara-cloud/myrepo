@@ -335,26 +335,36 @@ def wasender_webhook():
     payload = request.get_json(silent=True) or {}
     print(f"[WasenderWebhook] Received payload: {payload}")
 
-    allowed_events = {"messages.personal.received", "messages.received"}
-    event_name = payload.get("event") or payload.get("type")
-    if event_name not in allowed_events:
+    event_name = payload.get("event")
+    if event_name != "messages.personal.received":
         print(f"[WasenderWebhook] Ignoring event type: {event_name}")
         return "OK", 200
 
-    sender_phone_raw, sender_name = _extract_sender_details(payload)
-    normalized_phone = _normalize_iraqi_number(sender_phone_raw)
-    if not normalized_phone:
-        print(
-            f"[WasenderWebhook] Missing or invalid sender phone in payload; skipping. "
-            f"raw_phone={sender_phone_raw}"
-        )
+    data_section = payload.get("data")
+    if not isinstance(data_section, dict):
+        print("[WasenderWebhook] Missing data section; skipping event")
         return "OK", 200
 
-    sender_name = sender_name or "Unknown"
-    print(
-        f"[WasenderWebhook] Incoming message from {normalized_phone} "
-        f"({sender_name})"
+    sender_phone_raw = (
+        data_section.get("from")
+        or data_section.get("chatId")
+        or (
+            data_section.get("key", {}).get("remoteJid")
+            if isinstance(data_section.get("key"), dict)
+            else None
+        )
     )
+    if isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@c.us"):
+        sender_phone_raw = sender_phone_raw[:-4]
+    print(f"[WasenderWebhook] Extracted phone: {sender_phone_raw}")
+
+    normalized_phone = _normalize_iraqi_number(sender_phone_raw)
+    if not normalized_phone:
+        print("[WasenderWebhook] Invalid phone after normalization; skipping")
+        return "OK", 200
+
+    sender_name = data_section.get("pushName") or "Unknown"
+    print(f"[WasenderWebhook] Extracted name: {sender_name}")
 
     try:
         existing = (
@@ -369,20 +379,14 @@ def wasender_webhook():
         return "OK", 200
 
     if existing.data:
-        print(
-            f"[WasenderWebhook] Client already exists for {normalized_phone}; "
-            "no action taken"
-        )
+        print("[WasenderWebhook] Client already exists")
         return "OK", 200
 
     try:
         supabase.table("clients").insert(
             {"phone": normalized_phone, "name": sender_name}
         ).execute()
-        print(
-            f"[WasenderWebhook] Inserted new client "
-            f"({normalized_phone}, {sender_name})"
-        )
+        print("[WasenderWebhook] Client inserted")
     except Exception as exc:
         print(f"[WasenderWebhook] Failed to insert new client: {exc}")
 
