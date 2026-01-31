@@ -166,6 +166,60 @@ def _normalize_iraqi_number(phone):
     return f"+{digits}"
 
 
+def _extract_sender_details(payload):
+    def _first_dict(value):
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    return item
+        return None
+
+    search_spaces = []
+    if isinstance(payload, dict):
+        search_spaces.append(payload)
+        for key in ("data", "message", "payload"):
+            candidate = _first_dict(payload.get(key))
+            if candidate:
+                search_spaces.append(candidate)
+        data_section = _first_dict(payload.get("data"))
+        if data_section:
+            for key in ("message", "payload"):
+                candidate = _first_dict(data_section.get(key))
+                if candidate:
+                    search_spaces.append(candidate)
+        for key in ("messages", "entries", "contacts"):
+            candidate = _first_dict(payload.get(key))
+            if candidate:
+                search_spaces.append(candidate)
+
+    phone = None
+    name = None
+    phone_keys = ("from", "sender", "phone", "client_phone", "number")
+    name_keys = ("senderName", "name", "client_name", "contact_name")
+
+    for obj in search_spaces:
+        for key in phone_keys:
+            value = obj.get(key)
+            if value:
+                phone = value
+                break
+        if phone:
+            break
+
+    for obj in search_spaces:
+        for key in name_keys:
+            value = obj.get(key)
+            if value:
+                name = value
+                break
+        if name:
+            break
+
+    return phone, name
+
+
 def _send_whatsapp_message(message_body):
     if not WASENDER_API_KEY:
         print("[RentalNotifier] WasenderAPI key missing; cannot send message")
@@ -280,6 +334,58 @@ def health_check():
 def wasender_webhook():
     payload = request.get_json(silent=True) or {}
     print(f"[WasenderWebhook] Received payload: {payload}")
+
+    allowed_events = {"messages.personal.received", "messages.received"}
+    event_name = payload.get("event") or payload.get("type")
+    if event_name not in allowed_events:
+        print(f"[WasenderWebhook] Ignoring event type: {event_name}")
+        return "OK", 200
+
+    sender_phone_raw, sender_name = _extract_sender_details(payload)
+    normalized_phone = _normalize_iraqi_number(sender_phone_raw)
+    if not normalized_phone:
+        print(
+            f"[WasenderWebhook] Missing or invalid sender phone in payload; skipping. "
+            f"raw_phone={sender_phone_raw}"
+        )
+        return "OK", 200
+
+    sender_name = sender_name or "Unknown"
+    print(
+        f"[WasenderWebhook] Incoming message from {normalized_phone} "
+        f"({sender_name})"
+    )
+
+    try:
+        existing = (
+            supabase.table("clients")
+            .select("id")
+            .eq("phone", normalized_phone)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        print(f"[WasenderWebhook] Failed to query clients table: {exc}")
+        return "OK", 200
+
+    if existing.data:
+        print(
+            f"[WasenderWebhook] Client already exists for {normalized_phone}; "
+            "no action taken"
+        )
+        return "OK", 200
+
+    try:
+        supabase.table("clients").insert(
+            {"phone": normalized_phone, "name": sender_name}
+        ).execute()
+        print(
+            f"[WasenderWebhook] Inserted new client "
+            f"({normalized_phone}, {sender_name})"
+        )
+    except Exception as exc:
+        print(f"[WasenderWebhook] Failed to insert new client: {exc}")
+
     return "OK", 200
 
 
