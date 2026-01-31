@@ -469,17 +469,18 @@ def wasender_webhook():
             return "OK", 200
 
         if existing.data:
-            print("[MessageUpsert] Client already exists; no insert")
-            return "OK", 200
+            print(f"[MessageUpsert] Client resolved: {normalized_phone}")
+        else:
+            try:
+                supabase.table("clients").insert(
+                    {"phone": normalized_phone, "name": "Unknown", "source": "first_message"}
+                ).execute()
+                print(f"[MessageUpsert] Client created on first message: {normalized_phone}")
+            except Exception as exc:
+                print(f"[MessageUpsert] Failed to insert client: {exc}")
+                return "OK", 200
 
-        try:
-            supabase.table("clients").insert(
-                {"phone": normalized_phone, "name": "Unknown", "source": "first_message"}
-            ).execute()
-            print(f"[MessageUpsert] Client created on first message: {normalized_phone}")
-        except Exception as exc:
-            print(f"[MessageUpsert] Failed to insert client: {exc}")
-
+        print(f"[MessageUpsert] Client resolved for message: {normalized_phone}")
         return "OK", 200
 
     return "OK", 200
