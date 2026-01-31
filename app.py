@@ -414,22 +414,14 @@ def wasender_webhook():
             print("[MessageUpsert] Outbound message detected; skipping client insert")
             return "OK", 200
 
-        # Extraction priority: cleanedSenderPn -> senderPn -> key.remoteJid -> data-level fallbacks
+        # Extraction priority: cleanedSenderPn -> senderPn
+        cleaned_candidate = message.get("cleanedSenderPn")
+        sender_candidate = message.get("senderPn")
+        print(f"[MessageUpsert] cleanedSenderPn raw: {cleaned_candidate}")
+        print(f"[MessageUpsert] senderPn raw: {sender_candidate}")
         extraction_attempts = [
-            ("data.messages[0].cleanedSenderPn", message.get("cleanedSenderPn")),
-            ("data.messages[0].senderPn", message.get("senderPn")),
-            (
-                "data.messages[0].key.remoteJid",
-                (
-                    message.get("key", {}).get("remoteJid")
-                    if isinstance(message.get("key"), dict)
-                    else None
-                ),
-            ),
-            ("data.cleanedSenderPn", data_section.get("cleanedSenderPn")),
-            ("data.senderPn", data_section.get("senderPn")),
-            ("data.from", data_section.get("from")),
-            ("data.chatId", data_section.get("chatId")),
+            ("data.messages[0].cleanedSenderPn", cleaned_candidate),
+            ("data.messages[0].senderPn", sender_candidate),
         ]
 
         sender_phone_raw = None
@@ -442,7 +434,7 @@ def wasender_webhook():
                 break
 
         if sender_phone_raw is None:
-            print("[MessageUpsert] All extraction attempts failed; skipping")
+            print("[MessageUpsert] All extraction attempts failed; message skipped")
             return "OK", 200
 
         if isinstance(sender_phone_raw, str) and "@" in sender_phone_raw:
