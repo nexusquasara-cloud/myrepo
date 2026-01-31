@@ -414,7 +414,9 @@ def wasender_webhook():
             print("[MessageUpsert] Outbound message detected; skipping client insert")
             return "OK", 200
 
+        # Extraction priority: cleanedSenderPn -> senderPn -> key.remoteJid -> data-level fallbacks
         extraction_attempts = [
+            ("data.messages[0].cleanedSenderPn", message.get("cleanedSenderPn")),
             ("data.messages[0].senderPn", message.get("senderPn")),
             (
                 "data.messages[0].key.remoteJid",
@@ -424,6 +426,8 @@ def wasender_webhook():
                     else None
                 ),
             ),
+            ("data.cleanedSenderPn", data_section.get("cleanedSenderPn")),
+            ("data.senderPn", data_section.get("senderPn")),
             ("data.from", data_section.get("from")),
             ("data.chatId", data_section.get("chatId")),
         ]
@@ -441,19 +445,19 @@ def wasender_webhook():
             print("[MessageUpsert] All extraction attempts failed; skipping")
             return "OK", 200
 
-        if source_used == "data.messages[0].senderPn" and isinstance(
-            sender_phone_raw, str
-        ):
-            sender_phone_raw = sender_phone_raw.replace("@s.whatsapp.net", "")
+        if isinstance(sender_phone_raw, str) and "@" in sender_phone_raw:
+            sender_phone_raw = sender_phone_raw.split("@", 1)[0]
 
         digits_only = "".join(char for char in str(sender_phone_raw) if char.isdigit())
         normalized_phone = _normalize_iraqi_number(digits_only)
         print(
             f"[MessageUpsert] Source={source_used} raw={sender_phone_raw} "
-            f"normalized={normalized_phone}"
+            f"digits={digits_only} normalized={normalized_phone}"
         )
         if not normalized_phone:
-            print("[MessageUpsert] Normalization failed; skipping")
+            print(
+                f"[MessageUpsert] Normalization failed; message keys={list(message.keys())}"
+            )
             return "OK", 200
 
         try:
@@ -473,7 +477,7 @@ def wasender_webhook():
         else:
             try:
                 supabase.table("clients").insert(
-                    {"phone": normalized_phone, "name": "Unknown", "source": "first_message"}
+                    {"phone": normalized_phone, "name": "Unknown"}
                 ).execute()
                 print(f"[MessageUpsert] Client created on first message: {normalized_phone}")
             except Exception as exc:
