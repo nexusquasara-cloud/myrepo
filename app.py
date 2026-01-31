@@ -336,7 +336,8 @@ def wasender_webhook():
     print(f"[WasenderWebhook] Received payload: {payload}")
 
     event_name = payload.get("event")
-    if event_name != "messages.personal.received":
+    allowed_events = {"messages.personal.received", "messages-personal.received"}
+    if event_name not in allowed_events:
         print(f"[WasenderWebhook] Ignoring event type: {event_name}")
         return "OK", 200
 
