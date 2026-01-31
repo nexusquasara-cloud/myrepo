@@ -230,12 +230,15 @@ def _generate_request_id(headers):
 
 
 def _normalize_incoming_phone(value):
+    """
+    Normalize any incoming WhatsApp identifier to +9647XXXXXXXXX (13 digits).
+    Strips WhatsApp-specific suffixes like @s.whatsapp.net or @lid, keeps digits only,
+    upgrades local Iraqi numbers beginning with 07 to international format,
+    and rejects any non-Iraqi mobile numbers.
+    """
     if value is None:
         return None, "", "empty value"
     text = str(value).strip()
-    lowered = text.lower()
-    if "@lid" in lowered:
-        return None, "", "contains @lid"
     if "@" in text:
         text = text.split("@", 1)[0]
     digits = "".join(char for char in text if char.isdigit())
@@ -475,8 +478,8 @@ def wasender_webhook():
             ("data.messages[0].cleanedSenderPn", message.get("cleanedSenderPn")),
             ("data.messages[0].senderPn", message.get("senderPn")),
             (
-                "data.messages[0].key.remoteJid",
-                message.get("key", {}).get("remoteJid") if isinstance(message.get("key"), dict) else None,
+                "data.messages[0].remoteJid",
+                message.get("remoteJid"),
             ),
         ]
 
@@ -484,25 +487,18 @@ def wasender_webhook():
         source_used = None
         for path, value in candidate_order:
             raw_value = value
-            if isinstance(value, str) and "@" in value:
-                value = value.split("@", 1)[0]
-            digits = "".join(ch for ch in str(value) if ch.isdigit()) if value else ""
-            if not digits:
-                print(f"{log_prefix} [MessageUpsert] Field {path} rejected (no digits). Raw={raw_value}")
-                continue
-            if digits.startswith("07") and len(digits) == 11:
-                digits = "964" + digits[1:]
-            if digits.startswith("00"):
-                digits = digits[2:]
-            if not (digits.startswith("9647") and len(digits) == 13):
-                print(f"{log_prefix} [MessageUpsert] Field {path} rejected (not iraqi mobile). Digits={digits}")
-                continue
-            normalized_phone = f"+{digits}"
-            source_used = path
-            print(
-                f"{log_prefix} [MessageUpsert] Field {path} accepted. Raw={raw_value} Digits={digits} Normalized={normalized_phone}"
+            normalized_phone, digits, reason = _normalize_incoming_phone(value)
+            status = (
+                f"accepted -> {normalized_phone}"
+                if normalized_phone
+                else f"rejected ({reason})"
             )
-            break
+            print(
+                f"{log_prefix} [MessageUpsert] Field {path} raw={raw_value} digits={digits} status={status}"
+            )
+            if normalized_phone:
+                source_used = path
+                break
 
         if normalized_phone is None:
             print(f"{log_prefix} [MessageUpsert] No reliable phone found; full payload logged for debugging")
@@ -533,7 +529,6 @@ def wasender_webhook():
                         "phone": normalized_phone,
                         "name": push_name,
                         "source": "whatsapp",
-                        "created_at": datetime.now(timezone.utc).isoformat(),
                     }
                 ).execute()
                 print(f"{log_prefix} [MessageUpsert] Client created on first message: {normalized_phone}")
