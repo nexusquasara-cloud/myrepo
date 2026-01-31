@@ -24,7 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent
 WEBHOOK_DUMP_DIR = BASE_DIR / "webhook_dumps"
 IN_WEBHOOK_CONTEXT = False
 
-OWNER_WHATSAPP_NUMBER = "9647722602749"
+OWNER_NOTIFICATION_NUMBER = "+9647722602749"
 NOTIFICATION_INTERVAL_SECONDS = 60  # TEST MODE: notification check every 1 minute
 NOTIFICATION_LOOKAHEAD_DAYS = 7
 STATUS_LABELS = {"overdue": "Overdue", "expiring": "Expiring Soon"}
@@ -463,20 +463,20 @@ def _send_whatsapp_message(message_body):
         print("[RentalNotifier] WasenderAPI key missing; cannot send message")
         return False
 
-    normalized_owner = _normalize_iraqi_number(OWNER_WHATSAPP_NUMBER)
+    to_number = OWNER_NOTIFICATION_NUMBER
+    normalized_owner = _normalize_iraqi_number(to_number)
     if not normalized_owner:
         print("[RentalNotifier] Invalid WhatsApp number; cannot send message")
         return False
-    print(f"[RentalNotifier] Sending to OWNER: {normalized_owner}")
+    if normalized_owner != OWNER_NOTIFICATION_NUMBER:
+        print("[SECURITY] BLOCKED: attempt to send notification to non-owner number")
+        return False
+    print("[Notifier] Sending rental notification to OWNER +9647722602749")
 
     payload = {
         "to": normalized_owner,
         "text": message_body,
     }
-
-    if payload["to"] != normalized_owner:
-        print("[SECURITY] BLOCKED send to non-owner number")
-        return False
 
     try:
         response = requests.post(
@@ -592,12 +592,12 @@ def wasender_webhook():
             print(f"{log_prefix} [ContactsUpsert] Full payload: {payload}")
             if not isinstance(data_section, dict):
                 print(f"{log_prefix} [ContactsUpsert] Missing data section; skipping")
-                return "OK", 200
+                return "", 200
 
             contact_id = data_section.get("id")
             if not contact_id:
                 print(f"{log_prefix} [ContactsUpsert] Missing contact id; skipping")
-                return "OK", 200
+                return "", 200
 
             if isinstance(contact_id, str) and contact_id.endswith("@whatsapp.net"):
                 contact_id = contact_id[: -len("@whatsapp.net")]
@@ -608,7 +608,7 @@ def wasender_webhook():
             print(f"{log_prefix} [ContactsUpsert] Normalized phone: {normalized_phone}")
             if not normalized_phone:
                 print(f"{log_prefix} [ContactsUpsert] Failed to normalize phone; skipping")
-                return "OK", 200
+                return "", 200
 
             print(f"{log_prefix} [ContactsUpsert] Contact detected: {normalized_phone}")
             contact_name = data_section.get("name") or data_section.get("pushName") or "Unknown"
@@ -623,7 +623,7 @@ def wasender_webhook():
                 )
             except Exception as exc:
                 print(f"{log_prefix} [ContactsUpsert] Failed to query clients table: {exc}")
-                return "OK", 200
+                return "", 200
 
             try:
                 if existing.data:
@@ -640,7 +640,7 @@ def wasender_webhook():
             except Exception as exc:
                 print(f"{log_prefix} [ContactsUpsert] Failed to upsert client: {exc}")
 
-            return "OK", 200
+            return "", 200
 
         if normalized_event in SUPPORTED_MESSAGE_EVENTS:
             message_tag = "[MessageUpsert]" if normalized_event == "messages.upsert" else "[MessageEvent]"
@@ -648,17 +648,17 @@ def wasender_webhook():
             print(f"{log_prefix} {message_tag} Payload: {payload}")
             if not isinstance(data_section, dict):
                 print(f"{log_prefix} {message_tag} Missing data section; skipping")
-                return "OK", 200
+                return "", 200
 
             message = _coerce_message_dict(data_section)
             if not isinstance(message, dict):
                 print(f"{log_prefix} {message_tag} messages block missing or invalid; skipping")
-                return "OK", 200
+                return "", 200
             print(f"{log_prefix} {message_tag} messages keys={list(message.keys())}")
 
             if _extract_from_me_flag(message):
                 print(f"{log_prefix} {message_tag} Outbound message detected; skipping client insert")
-                return "OK", 200
+                return "", 200
 
             push_name, _ = _resolve_sender_name(payload, data_section, message)
             push_name = push_name or "Unknown"
@@ -739,7 +739,7 @@ def wasender_webhook():
             if normalized_phone is None:
                 print(f"{log_prefix} {message_tag} No reliable phone found; full payload logged for debugging")
                 print(f"{log_prefix} {message_tag} Payload: {payload}")
-                return {"status": "ignored", "reason": "no_phone"}, 200
+                return "", 200
 
             try:
                 existing = (
@@ -756,7 +756,7 @@ def wasender_webhook():
                     )
             except Exception as exc:
                 print(f"{log_prefix} {message_tag} Failed to query clients table: {exc}")
-                return "OK", 200
+                return "", 200
 
             if existing.data:
                 print(f"{log_prefix} {message_tag} Client resolved: {normalized_phone}")
@@ -775,12 +775,12 @@ def wasender_webhook():
                     print(f"{log_prefix} {message_tag} Client created on first message: {normalized_phone}")
                 except Exception as exc:
                     print(f"{log_prefix} {message_tag} Failed to insert client: {exc}")
-                    return "OK", 200
+                    return "", 200
 
             print(f"{log_prefix} {message_tag} Client resolved for message: {normalized_phone}")
-            return "OK", 200
+            return "", 200
 
-        return "OK", 200
+        return "", 200
     finally:
         IN_WEBHOOK_CONTEXT = False
 
