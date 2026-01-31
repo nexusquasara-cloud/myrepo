@@ -391,7 +391,8 @@ def wasender_webhook():
         return "OK", 200
 
     if event_name == "messages.upsert":
-        print("[MessageUpsert] Event received")
+        print("[MessageUpsert] Full payload received")
+        print(f"[MessageUpsert] Payload: {payload}")
         if not isinstance(data_section, dict):
             print("[MessageUpsert] Missing data section; skipping")
             return "OK", 200
@@ -413,48 +414,46 @@ def wasender_webhook():
             print("[MessageUpsert] Outbound message detected; skipping client insert")
             return "OK", 200
 
-        phone_sources = [
-            ("senderPn", message.get("senderPn")),
-            ("cleanedSenderPn", message.get("cleanedSenderPn")),
+        extraction_attempts = [
+            ("data.messages[0].senderPn", message.get("senderPn")),
             (
-                "key.remoteJid",
+                "data.messages[0].key.remoteJid",
                 (
                     message.get("key", {}).get("remoteJid")
                     if isinstance(message.get("key"), dict)
                     else None
                 ),
             ),
+            ("data.from", data_section.get("from")),
+            ("data.chatId", data_section.get("chatId")),
         ]
 
         sender_phone_raw = None
         source_used = None
-        for label, value in phone_sources:
-            print(f"[MessageUpsert] Trying field {label}: {value}")
+        for label, value in extraction_attempts:
+            print(f"[MessageUpsert] Attempting {label}: {value}")
             if value:
                 sender_phone_raw = value
                 source_used = label
                 break
 
         if sender_phone_raw is None:
-            print("[MessageUpsert] No sender phone found; skipping")
+            print("[MessageUpsert] All extraction attempts failed; skipping")
             return "OK", 200
 
-        if source_used in {"senderPn", "cleanedSenderPn"} and isinstance(
+        if source_used == "data.messages[0].senderPn" and isinstance(
             sender_phone_raw, str
         ):
             sender_phone_raw = sender_phone_raw.replace("@s.whatsapp.net", "")
 
         digits_only = "".join(char for char in str(sender_phone_raw) if char.isdigit())
-        if source_used == "key.remoteJid":
-            print(f"[MessageUpsert] key.remoteJid extracted digits: {digits_only}")
-
         normalized_phone = _normalize_iraqi_number(digits_only)
         print(
-            f"[MessageUpsert] Field used: {source_used}, raw: {sender_phone_raw}, "
-            f"normalized: {normalized_phone}"
+            f"[MessageUpsert] Source={source_used} raw={sender_phone_raw} "
+            f"normalized={normalized_phone}"
         )
         if not normalized_phone:
-            print("[MessageUpsert] Failed to normalize phone; skipping")
+            print("[MessageUpsert] Normalization failed; skipping")
             return "OK", 200
 
         try:
@@ -477,7 +476,7 @@ def wasender_webhook():
             supabase.table("clients").insert(
                 {"phone": normalized_phone, "name": "Unknown", "source": "first_message"}
             ).execute()
-            print(f"[MessageUpsert] Client inserted from first message: {normalized_phone}")
+            print(f"[MessageUpsert] Client created on first message: {normalized_phone}")
         except Exception as exc:
             print(f"[MessageUpsert] Failed to insert client: {exc}")
 
