@@ -346,42 +346,38 @@ def wasender_webhook():
         print("[WasenderWebhook] Missing data section; skipping event")
         return "OK", 200
 
-    key_section = data_section.get("key")
     messages = data_section.get("messages", {})
 
     sender_phone_raw = None
+    sender_from_senderpn = False
     if isinstance(messages, dict):
-        sender_phone_raw = (
-            messages.get("cleanedSenderPn")
-            or messages.get("senderPn")
-            or (
-                messages.get("key", {}).get("remoteJid")
-                if isinstance(messages.get("key"), dict)
-                else None
-            )
-        )
+        cleaned = messages.get("cleanedSenderPn")
+        if cleaned:
+            sender_phone_raw = cleaned
+        else:
+            sender_phone_raw = messages.get("senderPn")
+            sender_from_senderpn = sender_phone_raw is not None
     elif isinstance(messages, list) and messages:
         first_msg = messages[0] if isinstance(messages[0], dict) else {}
-        sender_phone_raw = (
-            first_msg.get("cleanedSenderPn")
-            or first_msg.get("senderPn")
-            or (
-                first_msg.get("key", {}).get("remoteJid")
-                if isinstance(first_msg.get("key"), dict)
-                else None
-            )
-        )
-    if sender_phone_raw is None and isinstance(key_section, dict):
-        sender_phone_raw = key_section.get("remoteJid")
+        cleaned = first_msg.get("cleanedSenderPn")
+        if cleaned:
+            sender_phone_raw = cleaned
+        else:
+            sender_phone_raw = first_msg.get("senderPn")
+            sender_from_senderpn = sender_phone_raw is not None
 
     print(f"[WasenderWebhook] Sender phone raw = {sender_phone_raw}")
 
-    if isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@s.whatsapp.net"):
+    if sender_phone_raw is None:
+        print("[WasenderWebhook] Invalid sender phone, skipping")
+        return "OK", 200
+
+    if sender_from_senderpn and isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@s.whatsapp.net"):
         sender_phone_raw = sender_phone_raw[: -len("@s.whatsapp.net")]
 
     normalized_phone = _normalize_iraqi_number(sender_phone_raw)
     if not normalized_phone:
-        print("[WasenderWebhook] Invalid phone after normalization; skipping")
+        print("[WasenderWebhook] Invalid sender phone, skipping")
         return "OK", 200
 
     sender_name = data_section.get("pushName") or "Unknown"
