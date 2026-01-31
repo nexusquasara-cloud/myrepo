@@ -340,22 +340,50 @@ def wasender_webhook():
         print(f"[WasenderWebhook] Ignoring event type: {event_name}")
         return "OK", 200
     print("[WasenderWebhook] Processing messages.upsert")
+    print(f"[WasenderWebhook][DEBUG] Payload: {payload}")
+    if isinstance(payload, dict):
+        print(f"[WasenderWebhook][DEBUG] Payload keys: {list(payload.keys())}")
+    else:
+        print(f"[WasenderWebhook][DEBUG] Payload type: {type(payload)}")
 
     data_section = payload.get("data")
+    print(f"[WasenderWebhook][DEBUG] data type: {type(data_section)}")
+    print(f"[WasenderWebhook][DEBUG] data value: {data_section}")
+    if isinstance(data_section, dict):
+        print(f"[WasenderWebhook][DEBUG] data keys: {list(data_section.keys())}")
     if not isinstance(data_section, dict):
         print("[WasenderWebhook] Missing data section; skipping event")
         return "OK", 200
 
     sender_phone_raw = None
     key_section = data_section.get("key")
+    print(f"[WasenderWebhook][DEBUG] key section: {key_section}")
+    if isinstance(key_section, dict):
+        print(f"[WasenderWebhook][DEBUG] key keys: {list(key_section.keys())}")
     if isinstance(key_section, dict):
         sender_phone_raw = key_section.get("remoteJid")
     print(f"[WasenderWebhook] remoteJid extracted: {sender_phone_raw}")
+    print(f"[WasenderWebhook][DEBUG] data.from = {data_section.get('from')}")
+    print(f"[WasenderWebhook][DEBUG] data.chatId = {data_section.get('chatId')}")
+    print(
+        f"[WasenderWebhook][DEBUG] data.key.remoteJid = "
+        f"{(data_section.get('key') or {}).get('remoteJid')}"
+    )
+    print(f"[WasenderWebhook][DEBUG] data.participant = {data_section.get('participant')}")
+    print(f"[WasenderWebhook][DEBUG] data.sender = {data_section.get('sender')}")
+    print(f"[WasenderWebhook][DEBUG] RAW sender_phone_raw = {sender_phone_raw}")
 
     if isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@c.us"):
         sender_phone_raw = sender_phone_raw[:-4]
 
+    if sender_phone_raw is not None:
+        digits = "".join(char for char in str(sender_phone_raw) if char.isdigit())
+    else:
+        digits = ""
+    print(f"[WasenderWebhook][DEBUG] Normalized digits = {digits}")
+
     normalized_phone = _normalize_iraqi_number(sender_phone_raw)
+    print(f"[WasenderWebhook][DEBUG] Final normalized phone = {normalized_phone}")
     if not normalized_phone:
         print("[WasenderWebhook] Invalid phone after normalization; skipping")
         return "OK", 200
@@ -379,13 +407,10 @@ def wasender_webhook():
         print("[WasenderWebhook] Client already exists")
         return "OK", 200
 
-    try:
-        supabase.table("clients").insert(
-            {"phone": normalized_phone, "name": sender_name}
-        ).execute()
-        print("[WasenderWebhook] Client inserted")
-    except Exception as exc:
-        print(f"[WasenderWebhook] Failed to insert new client: {exc}")
+    print(
+        "[WasenderWebhook][DEBUG] Skipping Supabase insert during debugging; "
+        f"would insert ({normalized_phone}, {sender_name})"
+    )
 
     return "OK", 200
 
