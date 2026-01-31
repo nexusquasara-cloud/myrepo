@@ -424,58 +424,27 @@ def wasender_webhook():
 
         cleaned_candidate = message.get("cleanedSenderPn")
         sender_candidate = message.get("senderPn")
-        participant_candidate = message.get("participant")
-        sender_field = message.get("sender")
-        from_field = message.get("from")
-        chat_id_field = message.get("chatId")
-        key_participant = (
-            message.get("key", {}).get("participant")
-            if isinstance(message.get("key"), dict)
-            else None
-        )
-        key_remote_jid = (
-            message.get("key", {}).get("remoteJid")
-            if isinstance(message.get("key"), dict)
-            else None
-        )
+        push_name = data_section.get("pushName") or message.get("pushName") or "Unknown"
         print(f"[MessageUpsert] cleanedSenderPn raw: {cleaned_candidate}")
         print(f"[MessageUpsert] senderPn raw: {sender_candidate}")
-        print(f"[MessageUpsert] participant: {participant_candidate}")
-        print(f"[MessageUpsert] key.remoteJid: {key_remote_jid}")
-
-        extraction_attempts = [
-            ("data.messages[0].cleanedSenderPn", cleaned_candidate),
-            ("data.messages[0].senderPn", sender_candidate),
-            ("data.messages[0].participant", participant_candidate),
-            ("data.messages[0].sender", sender_field),
-            ("data.messages[0].from", from_field),
-            ("data.messages[0].chatId", chat_id_field),
-            ("data.messages[0].key.participant", key_participant),
-        ]
 
         sender_phone_raw = None
         source_used = None
-        for label, value in extraction_attempts:
-            print(f"[MessageUpsert] Attempting {label}: {value}")
-            if value:
-                sender_phone_raw = value
-                source_used = label
-                break
-
-        if sender_phone_raw is None and key_remote_jid:
-            if isinstance(key_remote_jid, str) and key_remote_jid.endswith("@s.whatsapp.net"):
-                print("[MessageUpsert] Using key.remoteJid (s.whatsapp.net) as fallback")
-                sender_phone_raw = key_remote_jid
-                source_used = "data.messages[0].key.remoteJid"
-            else:
-                print("[MessageUpsert] key.remoteJid invalid or @lid; skipping fallback")
+        if cleaned_candidate:
+            sender_phone_raw = cleaned_candidate
+            source_used = "data.messages[0].cleanedSenderPn"
+        elif sender_candidate:
+            sender_phone_raw = sender_candidate
+            source_used = "data.messages[0].senderPn"
 
         if sender_phone_raw is None:
             print("[MessageUpsert] No reliable phone found; message skipped")
             return "OK", 200
 
-        if isinstance(sender_phone_raw, str) and "@" in sender_phone_raw:
-            sender_phone_raw = sender_phone_raw.split("@", 1)[0]
+        if source_used == "data.messages[0].senderPn" and isinstance(
+            sender_phone_raw, str
+        ):
+            sender_phone_raw = sender_phone_raw.replace("@s.whatsapp.net", "")
 
         digits_only = "".join(char for char in str(sender_phone_raw) if char.isdigit())
         normalized_phone = _normalize_iraqi_number(digits_only)
@@ -506,7 +475,7 @@ def wasender_webhook():
         else:
             try:
                 supabase.table("clients").insert(
-                    {"phone": normalized_phone, "name": "Unknown"}
+                    {"phone": normalized_phone, "name": push_name}
                 ).execute()
                 print(f"[MessageUpsert] Client created on first message: {normalized_phone}")
             except Exception as exc:
