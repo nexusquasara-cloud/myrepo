@@ -2,6 +2,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+import uuid
 
 import requests
 from flask import Flask, request
@@ -220,6 +221,77 @@ def _extract_sender_details(payload):
     return phone, name
 
 
+def _generate_request_id(headers):
+    return (
+        headers.get("X-Request-Id")
+        or headers.get("X-Amzn-Trace-Id")
+        or uuid.uuid4().hex[:8]
+    )
+
+
+def _extract_phone_candidates(message, data_section):
+    candidates = []
+    mapping = [
+        ("data.messages[0].cleanedSenderPn", message.get("cleanedSenderPn")),
+        ("data.messages[0].senderPn", message.get("senderPn")),
+        ("data.messages[0].participant", message.get("participant")),
+        ("data.messages[0].sender", message.get("sender")),
+        ("data.messages[0].from", message.get("from")),
+        ("data.messages[0].chatId", message.get("chatId")),
+        (
+            "data.messages[0].key.participant",
+            message.get("key", {}).get("participant")
+            if isinstance(message.get("key"), dict)
+            else None,
+        ),
+        ("data.cleanedSenderPn", data_section.get("cleanedSenderPn")),
+        ("data.senderPn", data_section.get("senderPn")),
+        ("data.senderId", data_section.get("senderId")),
+        ("data.from", data_section.get("from")),
+        ("data.chatId", data_section.get("chatId")),
+        (
+            "data.key.remoteJid",
+            data_section.get("key", {}).get("remoteJid")
+            if isinstance(data_section.get("key"), dict)
+            else None,
+        ),
+    ]
+    for path, value in mapping:
+        candidates.append((path, value))
+    return candidates
+
+
+def _normalize_incoming_phone(value):
+    if value is None:
+        return None, "", "empty value"
+    text = str(value).strip()
+    lowered = text.lower()
+    if "@lid" in lowered:
+        return None, "", "contains @lid"
+    if "@" in text:
+        text = text.split("@", 1)[0]
+    digits = "".join(char for char in text if char.isdigit())
+    if not digits:
+        return None, "", "no digits found"
+    if digits.startswith("07") and len(digits) == 11:
+        digits = "964" + digits[1:]
+    if digits.startswith("9647") and len(digits) == 13:
+        return digits, digits, None
+    return None, digits, "not iraqi mobile"
+
+
+def _resolve_sender_name(payload, data_section, message):
+    name_sources = [
+        ("data.messages[0].pushName", message.get("pushName")),
+        ("data.pushName", data_section.get("pushName")),
+        ("payload.pushName", payload.get("pushName")),
+    ]
+    for path, value in name_sources:
+        if value:
+            return value, path
+    return "Unknown", "default"
+
+
 def _send_whatsapp_message(message_body):
     if not WASENDER_API_KEY:
         print("[RentalNotifier] WasenderAPI key missing; cannot send message")
@@ -332,19 +404,22 @@ def health_check():
 
 @app.route("/wasender/webhook", methods=["POST"])
 def wasender_webhook():
+    req_id = _generate_request_id(request.headers)
+    log_prefix = f"[WasenderWebhook][{req_id}]"
     payload = request.get_json(silent=True) or {}
     event_name = payload.get("event")
     data_section = payload.get("data") or {}
+    print(f"{log_prefix} Event received: {event_name}")
 
     if event_name == "contacts.upsert":
-        print(f"[ContactsUpsert] Full payload: {payload}")
+        print(f"{log_prefix} [ContactsUpsert] Full payload: {payload}")
         if not isinstance(data_section, dict):
-            print("[ContactsUpsert] Missing data section; skipping")
+            print(f"{log_prefix} [ContactsUpsert] Missing data section; skipping")
             return "OK", 200
 
         contact_id = data_section.get("id")
         if not contact_id:
-            print("[ContactsUpsert] Missing contact id; skipping")
+            print(f"{log_prefix} [ContactsUpsert] Missing contact id; skipping")
             return "OK", 200
 
         if isinstance(contact_id, str) and contact_id.endswith("@whatsapp.net"):
@@ -352,13 +427,13 @@ def wasender_webhook():
 
         digits_only = "".join(char for char in str(contact_id) if char.isdigit())
         normalized_phone = _normalize_iraqi_number(digits_only)
-        print(f"[ContactsUpsert] Raw id: {contact_id}")
-        print(f"[ContactsUpsert] Normalized phone: {normalized_phone}")
+        print(f"{log_prefix} [ContactsUpsert] Raw id: {contact_id}")
+        print(f"{log_prefix} [ContactsUpsert] Normalized phone: {normalized_phone}")
         if not normalized_phone:
-            print("[ContactsUpsert] Failed to normalize phone; skipping")
+            print(f"{log_prefix} [ContactsUpsert] Failed to normalize phone; skipping")
             return "OK", 200
 
-        print(f"[ContactsUpsert] Contact detected: {normalized_phone}")
+        print(f"{log_prefix} [ContactsUpsert] Contact detected: {normalized_phone}")
         contact_name = data_section.get("name") or data_section.get("pushName") or "Unknown"
 
         try:
@@ -370,93 +445,89 @@ def wasender_webhook():
                 .execute()
             )
         except Exception as exc:
-            print(f"[ContactsUpsert] Failed to query clients table: {exc}")
+            print(f"{log_prefix} [ContactsUpsert] Failed to query clients table: {exc}")
             return "OK", 200
 
         try:
             if existing.data:
                 client_id = existing.data[0].get("id")
-                supabase.table("clients").update(
-                    {"name": contact_name}
-                ).eq("id", client_id).execute()
-                print(f"[ContactsUpsert] Client updated: {normalized_phone}")
+                supabase.table("clients").update({"name": contact_name}).eq(
+                    "id", client_id
+                ).execute()
+                print(f"{log_prefix} [ContactsUpsert] Client updated: {normalized_phone}")
             else:
                 supabase.table("clients").insert(
                     {"phone": normalized_phone, "name": contact_name}
                 ).execute()
-                print(f"[ContactsUpsert] Client inserted: {normalized_phone}")
+                print(f"{log_prefix} [ContactsUpsert] Client inserted: {normalized_phone}")
         except Exception as exc:
-            print(f"[ContactsUpsert] Failed to upsert client: {exc}")
+            print(f"{log_prefix} [ContactsUpsert] Failed to upsert client: {exc}")
 
         return "OK", 200
 
     if event_name == "messages.upsert":
-        print("[MessageUpsert] Full payload received")
-        print(f"[MessageUpsert] Payload: {payload}")
+        print(f"{log_prefix} [MessageUpsert] Full payload received")
+        print(f"{log_prefix} [MessageUpsert] Payload: {payload}")
         if not isinstance(data_section, dict):
-            print("[MessageUpsert] Missing data section; skipping")
+            print(f"{log_prefix} [MessageUpsert] Missing data section; skipping")
             return "OK", 200
 
         msgs = data_section.get("messages")
         message = {}
         if isinstance(msgs, dict):
             message = msgs
-            print("[MessageUpsert] messages type=dict")
+            print(f"{log_prefix} [MessageUpsert] messages type=dict keys={list(message.keys())}")
         elif isinstance(msgs, list) and msgs:
             candidate = msgs[0]
             if isinstance(candidate, dict):
                 message = candidate
-            print("[MessageUpsert] messages type=list")
+            print(f"{log_prefix} [MessageUpsert] messages type=list keys={list(message.keys())}")
         else:
-            print("[MessageUpsert] messages block missing or invalid; skipping")
+            print(f"{log_prefix} [MessageUpsert] messages block missing or invalid; skipping")
             return "OK", 200
 
         if not message:
-            print("[MessageUpsert] No message payload found; skipping")
+            print(f"{log_prefix} [MessageUpsert] No message payload found; skipping")
             return "OK", 200
 
         from_me = message.get("key", {}).get("fromMe")
         if from_me is None:
             from_me = message.get("fromMe")
         if from_me:
-            print("[MessageUpsert] Outbound message detected; skipping client insert")
+            print(f"{log_prefix} [MessageUpsert] Outbound message detected; skipping client insert")
             return "OK", 200
 
-        cleaned_candidate = message.get("cleanedSenderPn")
-        sender_candidate = message.get("senderPn")
-        push_name = data_section.get("pushName") or message.get("pushName") or "Unknown"
-        print(f"[MessageUpsert] cleanedSenderPn raw: {cleaned_candidate}")
-        print(f"[MessageUpsert] senderPn raw: {sender_candidate}")
+        push_name, name_source = _resolve_sender_name(payload, data_section, message)
+        print(f"{log_prefix} [MessageUpsert] Name source {name_source}: {push_name}")
 
-        sender_phone_raw = None
+        candidates = _extract_phone_candidates(message, data_section)
+        normalized_phone = None
         source_used = None
-        if cleaned_candidate:
-            sender_phone_raw = cleaned_candidate
-            source_used = "data.messages[0].cleanedSenderPn"
-        elif sender_candidate:
-            sender_phone_raw = sender_candidate
-            source_used = "data.messages[0].senderPn"
-
-        if sender_phone_raw is None:
-            print("[MessageUpsert] No reliable phone found; message skipped")
-            return "OK", 200
-
-        if source_used == "data.messages[0].senderPn" and isinstance(
-            sender_phone_raw, str
-        ):
-            sender_phone_raw = sender_phone_raw.replace("@s.whatsapp.net", "")
-
-        digits_only = "".join(char for char in str(sender_phone_raw) if char.isdigit())
-        normalized_phone = _normalize_iraqi_number(digits_only)
-        print(
-            f"[MessageUpsert] Source={source_used} raw={sender_phone_raw} "
-            f"digits={digits_only} normalized={normalized_phone}"
-        )
-        if not normalized_phone:
-            print(
-                f"[MessageUpsert] Normalization failed; message keys={list(message.keys())}"
+        for path, value in candidates:
+            normalized, digits_only, reason = _normalize_incoming_phone(value)
+            status = (
+                f"accepted -> {normalized}"
+                if normalized
+                else f"rejected ({reason})"
             )
-            return "OK", 200
+            print(
+                f"{log_prefix} [MessageUpsert] Candidate {path}: value={value} digits={digits_only} status={status}"
+            )
+            if normalized:
+                normalized_phone = normalized
+                source_used = path
+                break
+
+        if normalized_phone is None:
+            print(f"{log_prefix} [MessageUpsert] No reliable phone found; message skipped")
+            print(
+                f"{log_prefix} [MessageUpsert] Candidate paths tried: "
+                f"{[path for path, _ in candidates]}"
+            )
+            return (
+                {"status": "ignored", "reason": "no_valid_phone", "debug": {"event": event_name}},
+                200,
+            )
 
         try:
             existing = (
@@ -467,22 +538,22 @@ def wasender_webhook():
                 .execute()
             )
         except Exception as exc:
-            print(f"[MessageUpsert] Failed to query clients table: {exc}")
+            print(f"{log_prefix} [MessageUpsert] Failed to query clients table: {exc}")
             return "OK", 200
 
         if existing.data:
-            print(f"[MessageUpsert] Client resolved: {normalized_phone}")
+            print(f"{log_prefix} [MessageUpsert] Client resolved: {normalized_phone}")
         else:
             try:
                 supabase.table("clients").insert(
                     {"phone": normalized_phone, "name": push_name}
                 ).execute()
-                print(f"[MessageUpsert] Client created on first message: {normalized_phone}")
+                print(f"{log_prefix} [MessageUpsert] Client created on first message: {normalized_phone}")
             except Exception as exc:
-                print(f"[MessageUpsert] Failed to insert client: {exc}")
+                print(f"{log_prefix} [MessageUpsert] Failed to insert client: {exc}")
                 return "OK", 200
 
-        print(f"[MessageUpsert] Client resolved for message: {normalized_phone}")
+        print(f"{log_prefix} [MessageUpsert] Client resolved for message: {normalized_phone}")
         return "OK", 200
 
     return "OK", 200
