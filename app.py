@@ -459,15 +459,24 @@ def _send_whatsapp_message(message_body):
         print("[RentalNotifier] WasenderAPI key missing; cannot send message")
         return False
 
-    normalized = _normalize_iraqi_number(OWNER_WHATSAPP_NUMBER)
-    if not normalized:
+    normalized_owner = _normalize_iraqi_number(OWNER_WHATSAPP_NUMBER)
+    if not normalized_owner:
         print("[RentalNotifier] Invalid WhatsApp number; cannot send message")
         return False
+    print(f"[RentalNotifier] Sending to OWNER: {normalized_owner}")
 
     payload = {
-        "to": normalized,
+        "to": normalized_owner,
         "text": message_body,
     }
+
+    if payload["to"] != normalized_owner:
+        print(
+            "[RentalNotifier] ERROR: Attempted to send WhatsApp message to unauthorized destination "
+            f"{payload['to']}; aborting"
+        )
+        return False
+
     try:
         response = requests.post(
             f"{WASENDER_BASE_URL.rstrip('/')}/api/send-message",
