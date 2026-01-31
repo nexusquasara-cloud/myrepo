@@ -25,7 +25,7 @@ WEBHOOK_DUMP_DIR = BASE_DIR / "webhook_dumps"
 IN_WEBHOOK_CONTEXT = False
 
 OWNER_NOTIFICATION_NUMBER = "+9647722602749"
-NOTIFICATION_INTERVAL_SECONDS = 60  # TEST MODE: notification check every 1 minute
+NOTIFICATION_INTERVAL_SECONDS = 10  # TEST MODE: notification check every 1 minute
 NOTIFICATION_LOOKAHEAD_DAYS = 7
 STATUS_LABELS = {"overdue": "Overdue", "expiring": "Expiring Soon"}
 SUPPORTED_MESSAGE_EVENTS = {
