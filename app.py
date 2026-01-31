@@ -397,31 +397,60 @@ def wasender_webhook():
             print("[MessageUpsert] Missing data section; skipping")
             return "OK", 200
 
-        messages = data_section.get("messages") or []
-        if isinstance(messages, dict):
-            message = messages
-        elif isinstance(messages, list) and messages:
-            candidate = messages[0]
-            message = candidate if isinstance(candidate, dict) else {}
+        msgs = data_section.get("messages")
+        message = {}
+        if isinstance(msgs, dict):
+            message = msgs
+            print("[MessageUpsert] messages type=dict")
+        elif isinstance(msgs, list) and msgs:
+            candidate = msgs[0]
+            if isinstance(candidate, dict):
+                message = candidate
+            print("[MessageUpsert] messages type=list")
         else:
-            message = {}
+            print("[MessageUpsert] messages block missing or invalid; skipping")
+            return "OK", 200
 
         if not message:
             print("[MessageUpsert] No message payload found; skipping")
             return "OK", 200
 
-        if message.get("fromMe"):
+        from_me = message.get("key", {}).get("fromMe")
+        if from_me is None:
+            from_me = message.get("fromMe")
+        if from_me:
             print("[MessageUpsert] Outbound message detected; skipping client insert")
             return "OK", 200
 
-        # Extraction priority: cleanedSenderPn -> senderPn
         cleaned_candidate = message.get("cleanedSenderPn")
         sender_candidate = message.get("senderPn")
+        participant_candidate = message.get("participant")
+        sender_field = message.get("sender")
+        from_field = message.get("from")
+        chat_id_field = message.get("chatId")
+        key_participant = (
+            message.get("key", {}).get("participant")
+            if isinstance(message.get("key"), dict)
+            else None
+        )
+        key_remote_jid = (
+            message.get("key", {}).get("remoteJid")
+            if isinstance(message.get("key"), dict)
+            else None
+        )
         print(f"[MessageUpsert] cleanedSenderPn raw: {cleaned_candidate}")
         print(f"[MessageUpsert] senderPn raw: {sender_candidate}")
+        print(f"[MessageUpsert] participant: {participant_candidate}")
+        print(f"[MessageUpsert] key.remoteJid: {key_remote_jid}")
+
         extraction_attempts = [
             ("data.messages[0].cleanedSenderPn", cleaned_candidate),
             ("data.messages[0].senderPn", sender_candidate),
+            ("data.messages[0].participant", participant_candidate),
+            ("data.messages[0].sender", sender_field),
+            ("data.messages[0].from", from_field),
+            ("data.messages[0].chatId", chat_id_field),
+            ("data.messages[0].key.participant", key_participant),
         ]
 
         sender_phone_raw = None
@@ -433,8 +462,16 @@ def wasender_webhook():
                 source_used = label
                 break
 
+        if sender_phone_raw is None and key_remote_jid:
+            if isinstance(key_remote_jid, str) and key_remote_jid.endswith("@s.whatsapp.net"):
+                print("[MessageUpsert] Using key.remoteJid (s.whatsapp.net) as fallback")
+                sender_phone_raw = key_remote_jid
+                source_used = "data.messages[0].key.remoteJid"
+            else:
+                print("[MessageUpsert] key.remoteJid invalid or @lid; skipping fallback")
+
         if sender_phone_raw is None:
-            print("[MessageUpsert] All extraction attempts failed; message skipped")
+            print("[MessageUpsert] No reliable phone found; message skipped")
             return "OK", 200
 
         if isinstance(sender_phone_raw, str) and "@" in sender_phone_raw:
