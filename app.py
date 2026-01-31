@@ -333,17 +333,13 @@ def health_check():
 @app.route("/wasender/webhook", methods=["POST"])
 def wasender_webhook():
     payload = request.get_json(silent=True) or {}
-    print("[WasenderWebhook] Payload received")
 
     event_name = payload.get("event")
     if event_name != "messages.upsert":
-        print(f"[WasenderWebhook] Ignoring event type: {event_name}")
         return "OK", 200
-    print("[WasenderWebhook] Processing messages.upsert")
 
     data_section = payload.get("data")
     if not isinstance(data_section, dict):
-        print("[WasenderWebhook] Missing data section; skipping event")
         return "OK", 200
 
     messages = data_section.get("messages", {})
@@ -361,7 +357,6 @@ def wasender_webhook():
             sender_from_senderpn = sender_phone_raw is not None
 
     if sender_phone_raw is None:
-        print("[WasenderWebhook] No sender phone in this event, skipping safely")
         return "OK", 200
 
     if sender_from_senderpn and isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@s.whatsapp.net"):
@@ -370,11 +365,9 @@ def wasender_webhook():
     digits_only = "".join(char for char in str(sender_phone_raw) if char.isdigit())
     normalized_phone = _normalize_iraqi_number(digits_only)
     if not normalized_phone:
-        print("[WasenderWebhook] No sender phone in this event, skipping safely")
         return "OK", 200
 
     sender_name = data_section.get("pushName") or "Unknown"
-    print(f"[WasenderWebhook] Extracted name: {sender_name}")
 
     try:
         existing = (
@@ -389,14 +382,13 @@ def wasender_webhook():
         return "OK", 200
 
     if existing.data:
-        print("[WasenderWebhook] Client already exists")
         return "OK", 200
 
     try:
         supabase.table("clients").insert(
             {"phone": normalized_phone, "name": sender_name}
         ).execute()
-        print(f"[WasenderWebhook] Client auto-added successfully: {normalized_phone}")
+        print(f"[WasenderWebhook] Client auto-added: {normalized_phone}")
     except Exception as exc:
         print(f"[WasenderWebhook] Failed to insert new client: {exc}")
 
