@@ -332,14 +332,7 @@ def health_check():
 
 @app.route("/wasender/webhook", methods=["POST"])
 def wasender_webhook():
-    print("[TRACE 1] Webhook hit")
     payload = request.get_json(silent=True) or {}
-
-    event_name = payload.get("event")
-    print(f"[TRACE 2] Event type = {event_name}")
-    if event_name != "messages.upsert":
-        print("[TRACE 3] Event ignored (not messages.upsert)")
-        return "OK", 200
 
     data_section = payload.get("data")
     if not isinstance(data_section, dict):
@@ -349,9 +342,7 @@ def wasender_webhook():
     if isinstance(messages, list) and messages:
         messages = messages[0] if isinstance(messages[0], dict) else {}
     if not isinstance(messages, dict):
-        print("[TRACE 4] No messages block in payload")
         return "OK", 200
-    print(f"[TRACE 4] messages block found (type={type(messages).__name__})")
 
     sender_phone_raw = None
     sender_from_senderpn = False
@@ -362,26 +353,21 @@ def wasender_webhook():
         else:
             sender_phone_raw = messages.get("senderPn")
             sender_from_senderpn = sender_phone_raw is not None
-    print(f"[TRACE 5] sender_phone_raw = {sender_phone_raw}")
 
     if sender_phone_raw is None:
-        print("[TRACE 6] No sender phone in this event -> skipping safely")
+        print("[WasenderWebhook] No sender phone in this event")
         return "OK", 200
 
     if sender_from_senderpn and isinstance(sender_phone_raw, str) and sender_phone_raw.endswith("@s.whatsapp.net"):
         sender_phone_raw = sender_phone_raw[: -len("@s.whatsapp.net")]
 
     digits_only = "".join(char for char in str(sender_phone_raw) if char.isdigit())
-    print("[TRACE 7] Normalizing phone")
     normalized_phone = _normalize_iraqi_number(digits_only)
     if not normalized_phone:
-        print("[TRACE 8] Normalization failed -> skipping")
         return "OK", 200
-    print(f"[TRACE 8] Normalized phone = {normalized_phone}")
 
     sender_name = data_section.get("pushName") or "Unknown"
 
-    print("[TRACE 9] Checking if client exists in Supabase")
     try:
         existing = (
             supabase.table("clients")
@@ -395,15 +381,13 @@ def wasender_webhook():
         return "OK", 200
 
     if existing.data:
-        print("[TRACE 10] Client already exists -> no insert")
         return "OK", 200
 
-    print("[TRACE 11] Inserting new client")
     try:
         supabase.table("clients").insert(
             {"phone": normalized_phone, "name": sender_name}
         ).execute()
-        print(f"[TRACE 12] Client inserted successfully: {normalized_phone}")
+        print(f"[WasenderWebhook] Client auto-added: {normalized_phone}")
     except Exception as exc:
         print(f"[WasenderWebhook] Failed to insert new client: {exc}")
 
